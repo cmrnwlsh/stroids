@@ -1,6 +1,8 @@
+#![feature(array_windows)]
+
 mod tui;
 
-use std::time::Duration;
+use std::{iter, time::Duration};
 
 use bevy::{
     app::ScheduleRunnerPlugin,
@@ -10,8 +12,12 @@ use bevy::{
 };
 use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    style::Color,
     text::Line,
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{
+        Block, Paragraph, Wrap,
+        canvas::{self, Canvas},
+    },
 };
 use tui::{Input, LogStore, Terminal, TuiPlugin};
 
@@ -29,20 +35,20 @@ fn main() {
         .init_state::<ViewState>()
         .init_state::<PauseState>()
         .init_resource::<LogScroll>()
-        .add_systems(Startup, || info!("hello world"))
+        .add_systems(Startup, init)
         .add_systems(
             Update,
             (
                 listen_exit,
                 listen_log,
-                render_logs.run_if(in_state(ViewState::Log)),
-                render_game.run_if(in_state(ViewState::Game)),
+                (listen_scroll, draw_logs).run_if(in_state(ViewState::Log)),
+                draw_game.run_if(in_state(ViewState::Game)),
             ),
         )
         .run();
 }
 
-pub fn title_block(diag: Res<DiagnosticsStore>) -> Block {
+fn title_block(diag: Res<DiagnosticsStore>) -> Block {
     let fps = diag
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|fps| fps.smoothed())
@@ -52,7 +58,14 @@ pub fn title_block(diag: Res<DiagnosticsStore>) -> Block {
         .title(Line::from(" Movement: WASD • Shoot: Space • Log: ~/` • Pause: P ").right_aligned())
 }
 
-fn render_logs(
+fn init(mut commands: Commands, term: Res<Terminal>) {
+    info!("hello world");
+    let size = term.size().unwrap();
+    let (row, col) = ((size.width / 2).into(), (size.height / 2).into());
+    commands.spawn(PlayerBundle::new(Position { x: row, y: col }));
+}
+
+fn draw_logs(
     mut term: ResMut<Terminal>,
     diag: Res<DiagnosticsStore>,
     logs: Res<LogStore>,
@@ -75,9 +88,43 @@ fn render_logs(
     .unwrap();
 }
 
-fn render_game(mut term: ResMut<Terminal>, diag: Res<DiagnosticsStore>) {
-    term.draw(|frame| frame.render_widget(title_block(diag), frame.area()))
-        .unwrap();
+fn draw_game(
+    mut term: ResMut<Terminal>,
+    diag: Res<DiagnosticsStore>,
+    shapes: Query<(&Position, &Rotation)>,
+) {
+    const PLAYER_VERTS: [(f64, f64); 3] = [(-1., 0.), (0., 2.5), (1., 0.)];
+    term.draw(|frame| {
+        let block = title_block(diag);
+        let area = block.inner(frame.area());
+        let (w, h) = (area.width.into(), area.height.into());
+        frame.render_widget(
+            Canvas::default()
+                .block(block)
+                .x_bounds([0., w])
+                .y_bounds([0., h])
+                .paint(|ctx| {
+                    shapes.iter().for_each(|shape| {
+                        let (pos, rot) = shape;
+                        PLAYER_VERTS
+                            .array_windows::<2>()
+                            .chain(iter::once(&[PLAYER_VERTS[2], PLAYER_VERTS[0]]))
+                            .for_each(|&[p1, p2]| {
+                                let [(x1, y1), (x2, y2)] = [p1, p2];
+                                ctx.draw(&canvas::Line {
+                                    x1: x1 + pos.x,
+                                    y1: y1 + pos.y,
+                                    x2: x2 + pos.x,
+                                    y2: y2 + pos.y,
+                                    color: Color::White,
+                                });
+                            })
+                    });
+                }),
+            frame.area(),
+        )
+    })
+    .unwrap();
 }
 
 fn listen_exit(mut input: EventReader<Input>, mut exit: EventWriter<AppExit>) {
@@ -101,6 +148,19 @@ fn listen_log(
     input.read().for_each(|ev| {
         if let KeyCode::Char('`') | KeyCode::Char('~') = ev.code {
             next_state.set(state.get().next())
+        }
+    })
+}
+
+fn listen_scroll(mut events: EventReader<Input>, mut scroll: ResMut<LogScroll>) {
+    events.read().for_each(|ev| {
+        let s = &mut **scroll;
+        *s = match ev.code {
+            KeyCode::Up => s.saturating_sub(1),
+            KeyCode::Down => s.saturating_add(1),
+            KeyCode::PageUp => s.saturating_sub(10),
+            KeyCode::PageDown => s.saturating_add(10),
+            _ => *s,
         }
     })
 }
@@ -131,7 +191,7 @@ impl ViewState {
     }
 }
 
-#[derive(Component)]
+#[derive(Component, Default)]
 struct Player;
 
 #[derive(Bundle)]
@@ -139,6 +199,16 @@ struct PlayerBundle {
     marker: Player,
     pos: Position,
     rot: Rotation,
+}
+
+impl PlayerBundle {
+    fn new(pos: Position) -> Self {
+        Self {
+            marker: Player,
+            rot: Rotation(0.),
+            pos,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -151,14 +221,23 @@ struct AsteroidBundle {
     rot: Rotation,
 }
 
-#[derive(Component)]
-struct Vertices(Vec<Vec2>);
+#[derive(Component, Deref, DerefMut)]
+struct Velocity(f64);
 
-#[derive(Component)]
-struct Velocity(f32);
+#[derive(Component, Default, Debug)]
+struct Position {
+    x: f64,
+    y: f64,
+}
 
-#[derive(Component)]
-struct Position(Vec2);
+impl From<(f64, f64)> for Position {
+    fn from(value: (f64, f64)) -> Self {
+        Self {
+            x: value.0,
+            y: value.0,
+        }
+    }
+}
 
-#[derive(Component)]
-struct Rotation(Rot2);
+#[derive(Component, Default, Deref, DerefMut, Debug)]
+struct Rotation(f64);
