@@ -1,0 +1,33 @@
+[package]
+name = "stroids"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.15.3", default-features = false, features = [
+    "bevy_state",
+    "multi_threaded",
+    "async-io",
+] }
+log = { version = "*", features = [
+    "max_level_debug",
+    "release_max_level_info",
+] }
+better-panic = "0.3.0"
+ratatui = "0.29.0"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[target.'cfg(windows)'.build-dependencies]
+cross = "0.2.5"
+
+[workspace.metadata.cross.target.x86_64-pc-windows-gnu]
+pre-build = ["apt-get update && apt-get --assume-yes install clang"]
