@@ -146,14 +146,25 @@ fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Isometry, &XfState
     for (mut xf, XfState { current, last }) in &mut query {
         let a = time.overstep_fraction();
         xf.translation = last.translation.lerp(current.translation, a);
+        xf.rotation = last.rotation.slerp(current.rotation, a);
     }
 }
 
-fn apply_velocity(time: Res<Time>, mut query: Query<(&Velocity, &mut XfState)>) {
-    for (velocity, xf_state) in &mut query {
+fn apply_velocity(
+    time: Res<Time>,
+    mut query: Query<(&mut AngularVelocity, &Velocity, &mut XfState)>,
+) {
+    for (mut w, v, xf_state) in &mut query {
         let XfState { current, last } = xf_state.into_inner();
-        last.translation = current.translation;
-        current.translation += **velocity * time.delta_secs();
+        *last = *current;
+        current.translation += **v * time.delta_secs();
+        current.rotation =
+            (current.rotation.as_radians() + w.to_radians() * time.delta_secs()).into();
+        **w += match **w {
+            1.0.. => -1.,
+            0. => 0.,
+            _ => 1.,
+        }
     }
 }
 
@@ -175,14 +186,15 @@ fn listen_interact(
     mut query: Query<(&mut AngularVelocity, &mut Velocity, &Isometry), With<Player>>,
 ) {
     let (mut w, mut v, xf) = query.single_mut();
+    let r = xf.rotation * Rot2::FRAC_PI_2;
     for ev in input.read() {
         if let KeyCode::Char(c @ 'd' | c @ 'a') = ev.code {
-            **w += if c == 'd' { 0.5 } else { -0.5 }
+            **w += if c == 'd' { -10. } else { 10. }
         };
         if let KeyCode::Char(c @ 'w' | c @ 's') = ev.code {
             let dir = if c == 'w' { 1. } else { -1. };
-            v.x += dir * xf.rotation.sin;
-            v.y += dir * xf.rotation.cos;
+            v.x += dir * r.cos;
+            v.y += dir * r.sin;
         }
     }
 }
@@ -258,7 +270,7 @@ impl PlayerBundle {
             marker: Player,
             velocity: Velocity(Vec2::from((0., 0.))),
             angular_velocity: AngularVelocity(0.),
-            vertices: Vertices([(-1., 0.), (0., 2.), (1., 0.)].map(Vec2::from).to_vec()),
+            vertices: Vertices([(-1., -1.), (0., 1.5), (1., -1.)].map(Vec2::from).to_vec()),
             isometry: isometry.into(),
             xf_state: XfState {
                 current: isometry,
