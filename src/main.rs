@@ -34,6 +34,7 @@ fn main() {
         ))
         .init_state::<ViewState>()
         .init_state::<PauseState>()
+        .insert_resource(Time::from_hz(60.))
         .init_resource::<LogScroll>()
         .add_systems(Startup, init)
         .add_systems(
@@ -42,8 +43,13 @@ fn main() {
                 listen_exit,
                 listen_log,
                 (listen_scroll, draw_logs).run_if(in_state(ViewState::Log)),
-                draw_game.run_if(in_state(ViewState::Game)),
+                (listen_interact, (interpolate, draw_game).chain())
+                    .run_if(in_state(ViewState::Game)),
             ),
+        )
+        .add_systems(
+            FixedUpdate,
+            apply_velocity.run_if(in_state(ViewState::Game)),
         )
         .run();
 }
@@ -62,7 +68,7 @@ fn init(mut commands: Commands, term: Res<Terminal>) {
     info!("hello world");
     let size = term.size().unwrap();
     let (row, col) = ((size.width / 2).into(), (size.height / 2).into());
-    commands.spawn(PlayerBundle::new(Position { x: row, y: col }));
+    commands.spawn(PlayerBundle::new(row, col));
 }
 
 fn draw_logs(
@@ -91,9 +97,8 @@ fn draw_logs(
 fn draw_game(
     mut term: ResMut<Terminal>,
     diag: Res<DiagnosticsStore>,
-    shapes: Query<(&Position, &Rotation)>,
+    shapes: Query<(&Isometry, &Vertices)>,
 ) {
-    const PLAYER_VERTS: [(f64, f64); 3] = [(-1., 0.), (0., 2.5), (1., 0.)];
     term.draw(|frame| {
         let block = title_block(diag);
         let area = block.inner(frame.area());
@@ -104,22 +109,32 @@ fn draw_game(
                 .x_bounds([0., w])
                 .y_bounds([0., h])
                 .paint(|ctx| {
-                    shapes.iter().for_each(|shape| {
-                        let (pos, rot) = shape;
-                        PLAYER_VERTS
+                    for (
+                        Isometry2d {
+                            translation: Vec2 { x: px, y: py },
+                            rotation: r,
+                        },
+                        vs,
+                    ) in shapes.into_iter().map(|(xf, vs)| (xf.into(), vs))
+                    {
+                        for pair in vs
                             .array_windows::<2>()
-                            .chain(iter::once(&[PLAYER_VERTS[2], PLAYER_VERTS[0]]))
-                            .for_each(|&[p1, p2]| {
-                                let [(x1, y1), (x2, y2)] = [p1, p2];
-                                ctx.draw(&canvas::Line {
-                                    x1: x1 + pos.x,
-                                    y1: y1 + pos.y,
-                                    x2: x2 + pos.x,
-                                    y2: y2 + pos.y,
-                                    color: Color::White,
-                                });
-                            })
-                    });
+                            .chain(iter::once(&[*vs.last().unwrap(), vs[0]]))
+                        {
+                            let [(x1, y1), (x2, y2)] = pair
+                                .map(|Vec2 { x, y }| {
+                                    (px + (x * r.cos - y * r.sin), py + (x * r.sin + y * r.cos))
+                                })
+                                .map(|(x, y)| (x as f64, y as f64));
+                            ctx.draw(&canvas::Line {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                color: Color::White,
+                            });
+                        }
+                    }
                 }),
             frame.area(),
         )
@@ -127,8 +142,23 @@ fn draw_game(
     .unwrap();
 }
 
+fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Isometry, &XfState)>) {
+    for (mut xf, XfState { current, last }) in &mut query {
+        let a = time.overstep_fraction();
+        xf.translation = last.translation.lerp(current.translation, a);
+    }
+}
+
+fn apply_velocity(time: Res<Time>, mut query: Query<(&Velocity, &mut XfState)>) {
+    for (velocity, xf_state) in &mut query {
+        let XfState { current, last } = xf_state.into_inner();
+        last.translation = current.translation;
+        current.translation += **velocity * time.delta_secs();
+    }
+}
+
 fn listen_exit(mut input: EventReader<Input>, mut exit: EventWriter<AppExit>) {
-    input.read().for_each(|ev| {
+    for ev in input.read() {
         if let KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
@@ -137,7 +167,24 @@ fn listen_exit(mut input: EventReader<Input>, mut exit: EventWriter<AppExit>) {
         {
             exit.send_default();
         }
-    })
+    }
+}
+
+fn listen_interact(
+    mut input: EventReader<Input>,
+    mut query: Query<(&mut AngularVelocity, &mut Velocity, &Isometry), With<Player>>,
+) {
+    let (mut w, mut v, xf) = query.single_mut();
+    for ev in input.read() {
+        if let KeyCode::Char(c @ 'd' | c @ 'a') = ev.code {
+            **w += if c == 'd' { 0.5 } else { -0.5 }
+        };
+        if let KeyCode::Char(c @ 'w' | c @ 's') = ev.code {
+            let dir = if c == 'w' { 1. } else { -1. };
+            v.x += dir * xf.rotation.sin;
+            v.y += dir * xf.rotation.cos;
+        }
+    }
 }
 
 fn listen_log(
@@ -145,15 +192,15 @@ fn listen_log(
     state: Res<State<ViewState>>,
     mut next_state: ResMut<NextState<ViewState>>,
 ) {
-    input.read().for_each(|ev| {
+    for ev in input.read() {
         if let KeyCode::Char('`') | KeyCode::Char('~') = ev.code {
             next_state.set(state.get().next())
         }
-    })
+    }
 }
 
-fn listen_scroll(mut events: EventReader<Input>, mut scroll: ResMut<LogScroll>) {
-    events.read().for_each(|ev| {
+fn listen_scroll(mut input: EventReader<Input>, mut scroll: ResMut<LogScroll>) {
+    for ev in input.read() {
         let s = &mut **scroll;
         *s = match ev.code {
             KeyCode::Up => s.saturating_sub(1),
@@ -162,7 +209,7 @@ fn listen_scroll(mut events: EventReader<Input>, mut scroll: ResMut<LogScroll>) 
             KeyCode::PageDown => s.saturating_add(10),
             _ => *s,
         }
-    })
+    }
 }
 
 #[derive(Resource, Deref, DerefMut, Default)]
@@ -197,16 +244,26 @@ struct Player;
 #[derive(Bundle)]
 struct PlayerBundle {
     marker: Player,
-    pos: Position,
-    rot: Rotation,
+    velocity: Velocity,
+    angular_velocity: AngularVelocity,
+    isometry: Isometry,
+    vertices: Vertices,
+    xf_state: XfState,
 }
 
 impl PlayerBundle {
-    fn new(pos: Position) -> Self {
+    fn new(x: f32, y: f32) -> Self {
+        let isometry = Isometry2d::from_xy(x, y);
         Self {
             marker: Player,
-            rot: Rotation(0.),
-            pos,
+            velocity: Velocity(Vec2::from((0., 0.))),
+            angular_velocity: AngularVelocity(0.),
+            vertices: Vertices([(-1., 0.), (0., 2.), (1., 0.)].map(Vec2::from).to_vec()),
+            isometry: isometry.into(),
+            xf_state: XfState {
+                current: isometry,
+                last: isometry,
+            },
         }
     }
 }
@@ -217,27 +274,35 @@ struct Asteroid;
 #[derive(Bundle)]
 struct AsteroidBundle {
     marker: Asteroid,
-    pos: Position,
-    rot: Rotation,
+    transform: Transform,
 }
 
 #[derive(Component, Deref, DerefMut)]
-struct Velocity(f64);
+struct Velocity(Vec2);
+
+#[derive(Component, Deref, DerefMut)]
+struct AngularVelocity(f32);
+
+#[derive(Component, Default, Debug, Deref, DerefMut)]
+struct Vertices(Vec<Vec2>);
 
 #[derive(Component, Default, Debug)]
-struct Position {
-    x: f64,
-    y: f64,
+struct XfState {
+    current: Isometry2d,
+    last: Isometry2d,
 }
 
-impl From<(f64, f64)> for Position {
-    fn from(value: (f64, f64)) -> Self {
-        Self {
-            x: value.0,
-            y: value.0,
-        }
+#[derive(Component, Default, Debug, Deref, DerefMut)]
+struct Isometry(Isometry2d);
+
+impl From<Isometry2d> for Isometry {
+    fn from(value: Isometry2d) -> Self {
+        Self(value)
     }
 }
 
-#[derive(Component, Default, Deref, DerefMut, Debug)]
-struct Rotation(f64);
+impl From<&Isometry> for Isometry2d {
+    fn from(value: &Isometry) -> Self {
+        **value
+    }
+}
