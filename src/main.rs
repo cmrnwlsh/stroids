@@ -1,5 +1,6 @@
 #![feature(array_windows)]
 
+mod log;
 mod tui;
 
 use std::{iter, time::Duration};
@@ -10,8 +11,10 @@ use bevy::{
     prelude::*,
     state::app::StatesPlugin,
 };
+use log::LogStore;
 use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    layout::Size,
     style::Color,
     text::Line,
     widgets::{
@@ -19,7 +22,7 @@ use ratatui::{
         canvas::{self, Canvas},
     },
 };
-use tui::{Input, LogStore, Terminal, TuiPlugin};
+use tui::{Input, Terminal, TuiPlugin};
 
 fn main() {
     App::new()
@@ -49,7 +52,9 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            apply_velocity.run_if(in_state(ViewState::Game)),
+            (apply_velocity, wrap_player)
+                .chain()
+                .run_if(in_state(ViewState::Game)),
         )
         .run();
 }
@@ -140,6 +145,26 @@ fn draw_game(
         )
     })
     .unwrap();
+}
+
+fn wrap_player(term: Res<Terminal>, mut query: Query<(&mut Isometry, &mut XfState), With<Player>>) {
+    let (mut xf, mut xfs) = query.single_mut();
+    let Size { width, height } = term.size().unwrap();
+    let (width, height) = (width as f32, height as f32);
+
+    if xf.translation.x < 0. || xf.translation.x > width {
+        let new_x = if xf.translation.x < 0. { width } else { 0. };
+        xf.translation.x = new_x;
+        xfs.current.translation.x = new_x;
+        xfs.last.translation.x = new_x;
+    }
+
+    if xf.translation.y < 0. || xf.translation.y > height {
+        let new_y = if xf.translation.y < 0. { height } else { 0. };
+        xf.translation.y = new_y;
+        xfs.current.translation.y = new_y;
+        xfs.last.translation.y = new_y;
+    }
 }
 
 fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Isometry, &XfState)>) {
