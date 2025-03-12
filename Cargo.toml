@@ -13,8 +13,8 @@ log = { version = "*", features = [
     "max_level_debug",
     "release_max_level_info",
 ] }
-better-panic = "0.3.0"
 ratatui = "0.29.0"
+bevy_ratatui = "0.7.0"
 
 [profile.dev]
 opt-level = 1
