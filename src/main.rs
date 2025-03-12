@@ -2,8 +2,6 @@
 
 mod log;
 
-use std::{iter, time::Duration};
-
 use bevy::{
     app::ScheduleRunnerPlugin,
     diagnostic::{DiagnosticsPlugin, DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -22,9 +20,10 @@ use ratatui::{
     text::Line,
     widgets::{
         Block, Paragraph, Wrap,
-        canvas::{self, Canvas},
+        canvas::{self, Canvas, Context},
     },
 };
+use std::{iter, time::Duration};
 
 fn main() {
     App::new()
@@ -111,43 +110,46 @@ fn draw_game(
     diag: Res<DiagnosticsStore>,
     shapes: Query<(&Isometry, &Vertices)>,
 ) {
+    let painter = |ctx: &mut Context| {
+        for (
+            Isometry2d {
+                translation: Vec2 { x: px, y: py },
+                rotation: r,
+            },
+            vs,
+        ) in shapes.into_iter().map(|(xf, vs)| (xf.into(), vs))
+        {
+            for pair in vs
+                .array_windows::<2>()
+                .chain(iter::once(&[*vs.last().unwrap(), vs[0]]))
+            {
+                let [(x1, y1), (x2, y2)] = pair.map(|Vec2 { x, y }| {
+                    (
+                        (px + (x * r.cos - y * r.sin)).into(),
+                        (py + (x * r.sin + y * r.cos)).into(),
+                    )
+                });
+                ctx.draw(&canvas::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: Color::White,
+                });
+            }
+        }
+    };
     term.draw(|frame| {
         let block = title_block(diag);
         let area = block.inner(frame.area());
         let (w, h) = (area.width.into(), area.height.into());
+
         frame.render_widget(
             Canvas::default()
                 .block(block)
                 .x_bounds([0., w])
                 .y_bounds([0., h])
-                .paint(|ctx| {
-                    for (
-                        Isometry2d {
-                            translation: Vec2 { x: px, y: py },
-                            rotation: r,
-                        },
-                        vs,
-                    ) in shapes.into_iter().map(|(xf, vs)| (xf.into(), vs))
-                    {
-                        for pair in vs
-                            .array_windows::<2>()
-                            .chain(iter::once(&[*vs.last().unwrap(), vs[0]]))
-                        {
-                            let [(x1, y1), (x2, y2)] = pair
-                                .map(|Vec2 { x, y }| {
-                                    (px + (x * r.cos - y * r.sin), py + (x * r.sin + y * r.cos))
-                                })
-                                .map(|(x, y)| (x as f64, y as f64));
-                            ctx.draw(&canvas::Line {
-                                x1,
-                                y1,
-                                x2,
-                                y2,
-                                color: Color::White,
-                            });
-                        }
-                    }
-                }),
+                .paint(painter),
             frame.area(),
         )
     })
@@ -260,8 +262,8 @@ fn listen_log(
     state: Res<State<ViewState>>,
     mut next_state: ResMut<NextState<ViewState>>,
 ) {
+    use ratatui::crossterm::event::KeyCode;
     for ev in events.read() {
-        use ratatui::crossterm::event::KeyCode;
         if let KeyCode::Char('`') | KeyCode::Char('~') = ev.code {
             next_state.set(state.get().next())
         }
