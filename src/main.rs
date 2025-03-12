@@ -53,7 +53,7 @@ fn main() {
                 listen_exit,
                 listen_log,
                 (listen_scroll, draw_logs).run_if(in_state(ViewState::Log)),
-                (listen_interact, (interpolate, draw_game).chain())
+                (listen_movement, (interpolate, draw_game).chain())
                     .run_if(in_state(ViewState::Game)),
             ),
         )
@@ -189,6 +189,8 @@ fn apply_velocity(
     time: Res<Time>,
     mut query: Query<(&mut AngularVelocity, &mut Velocity, &mut XfState)>,
 ) {
+    const MAX_VELOCITY: f32 = 20.0;
+    const MAX_ANGULAR_VELOCITY: f32 = 4.0;
     const ANGULAR_DAMPING: f32 = 5.;
     const LINEAR_DAMPING: f32 = 0.6;
 
@@ -201,6 +203,13 @@ fn apply_velocity(
 
         **w *= 1.0 - (ANGULAR_DAMPING * time.delta_secs()).min(1.0);
         **v *= 1.0 - (LINEAR_DAMPING * time.delta_secs()).min(1.0);
+
+        let speed = Vec2::new(v.x, v.y).length();
+        if speed > MAX_VELOCITY {
+            **v *= MAX_VELOCITY / speed;
+        }
+
+        **w = w.clamp(-MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY);
     }
 }
 
@@ -218,12 +227,10 @@ fn listen_exit(mut events: EventReader<KeyEvent>, mut exit: EventWriter<AppExit>
     }
 }
 
-fn listen_interact(
+fn listen_movement(
     input: Res<ButtonInput<KeyCode>>,
     mut query: Query<(&mut AngularVelocity, &mut Velocity, &Isometry), With<Player>>,
 ) {
-    const MAX_VELOCITY: f32 = 20.0;
-    const MAX_ANGULAR_VELOCITY: f32 = 4.0;
     const THRUST_POWER: f32 = 0.4;
     const ROTATION_POWER: f32 = 0.15;
 
@@ -246,13 +253,6 @@ fn listen_interact(
             _ => {}
         }
     }
-
-    let speed = Vec2::new(v.x, v.y).length();
-    if speed > MAX_VELOCITY {
-        **v *= MAX_VELOCITY / speed;
-    }
-
-    **w = w.clamp(-MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY);
 }
 
 fn listen_log(
