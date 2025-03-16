@@ -15,6 +15,7 @@ log = { version = "*", features = [
 ] }
 ratatui = "0.29.0"
 bevy_ratatui = "0.7.0"
+paste = "1.0.15"
 
 [profile.dev]
 opt-level = 1

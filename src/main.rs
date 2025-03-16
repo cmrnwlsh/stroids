@@ -14,6 +14,7 @@ use bevy_ratatui::{
     terminal::{self, RatatuiContext},
 };
 use log::{LogPlugin, LogStore};
+use paste::paste;
 use ratatui::{
     layout::Size,
     style::Color,
@@ -24,6 +25,13 @@ use ratatui::{
     },
 };
 use std::{iter, time::Duration};
+
+const MAX_VELOCITY: f32 = 20.0;
+const MAX_ANGULAR_VELOCITY: f32 = 4.0;
+const LINEAR_DAMPING: f32 = 0.6;
+const ANGULAR_DAMPING: f32 = 5.;
+const THRUST_POWER: f32 = 0.4;
+const ROTATION_POWER: f32 = 0.15;
 
 fn main() {
     App::new()
@@ -52,13 +60,19 @@ fn main() {
                 listen_exit,
                 listen_log,
                 (listen_scroll, draw_logs).run_if(in_state(ViewState::Log)),
-                (listen_movement, (interpolate, draw_game).chain())
-                    .run_if(in_state(ViewState::Game)),
+                (listen_movement, (interpolate, draw_game).chain()).run_if(
+                    |view: Res<State<ViewState>>, pause: Res<State<PauseState>>| {
+                        matches!(
+                            (view.get(), pause.get()),
+                            (ViewState::Game, PauseState::Resume)
+                        )
+                    },
+                ),
             ),
         )
         .add_systems(
             FixedUpdate,
-            (apply_velocity, wrap_player)
+            (apply_velocity, dampen, wrap_player)
                 .chain()
                 .run_if(in_state(ViewState::Game)),
         )
@@ -108,9 +122,9 @@ fn draw_logs(
 fn draw_game(
     mut term: ResMut<RatatuiContext>,
     diag: Res<DiagnosticsStore>,
-    shapes: Query<(&Isometry, &Vertices)>,
+    shapes: Query<(&Xf, &Vertices)>,
 ) {
-    let size = term.size().unwrap();
+    let Size { width, height } = term.size().unwrap();
     let painter = |ctx: &mut Context| {
         for (
             Isometry2d {
@@ -130,8 +144,8 @@ fn draw_game(
                         (py + (x * r.sin + y * r.cos)) as f64,
                     )
                 });
-                let [x1, x2] = [x1, x2].map(|p| p.clamp(0., size.width as f64 - 2.));
-                let [y1, y2] = [y1, y2].map(|p| p.clamp(0., size.height as f64 - 2.));
+                let [x1, x2] = [x1, x2].map(|p| p.clamp(0., width as f64 - 2.));
+                let [y1, y2] = [y1, y2].map(|p| p.clamp(0., height as f64 - 2.));
                 ctx.draw(&canvas::Line {
                     x1,
                     y1,
@@ -159,10 +173,7 @@ fn draw_game(
     .unwrap();
 }
 
-fn wrap_player(
-    term: Res<RatatuiContext>,
-    mut query: Query<(&mut Isometry, &mut XfState), With<Player>>,
-) {
+fn wrap_player(term: Res<RatatuiContext>, mut query: Query<(&mut Xf, &mut XfState), With<Player>>) {
     let (mut xf, mut xfs) = query.single_mut();
     let Size { width, height } = term.size().unwrap();
     let (width, height) = (width as f32, height as f32);
@@ -182,7 +193,7 @@ fn wrap_player(
     }
 }
 
-fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Isometry, &XfState)>) {
+fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Xf, &XfState)>) {
     for (mut xf, XfState { current, last }) in &mut query {
         let a = time.overstep_fraction();
         xf.translation = last.translation.lerp(current.translation, a);
@@ -190,55 +201,33 @@ fn interpolate(time: Res<Time<Fixed>>, mut query: Query<(&mut Isometry, &XfState
     }
 }
 
-fn apply_velocity(
-    time: Res<Time>,
-    mut query: Query<(&mut AngularVelocity, &mut Velocity, &mut XfState)>,
-) {
-    const MAX_VELOCITY: f32 = 20.0;
-    const MAX_ANGULAR_VELOCITY: f32 = 4.0;
-    const ANGULAR_DAMPING: f32 = 5.;
-    const LINEAR_DAMPING: f32 = 0.6;
-
-    for (mut w, mut v, xf_state) in &mut query {
+fn apply_velocity(time: Res<Time>, mut query: Query<(&AngularVelocity, &Velocity, &mut XfState)>) {
+    for (w, v, xf_state) in &mut query {
         let XfState { current, last } = xf_state.into_inner();
         *last = *current;
 
         current.translation += **v * time.delta_secs();
         current.rotation = (current.rotation.as_radians() + **w * time.delta_secs()).into();
-
-        **w *= 1.0 - (ANGULAR_DAMPING * time.delta_secs()).min(1.0);
-        **v *= 1.0 - (LINEAR_DAMPING * time.delta_secs()).min(1.0);
-
-        let speed = Vec2::new(v.x, v.y).length();
-        if speed > MAX_VELOCITY {
-            **v *= MAX_VELOCITY / speed;
-        }
-
-        **w = w.clamp(-MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY);
     }
 }
 
-fn listen_exit(mut events: EventReader<KeyEvent>, mut exit: EventWriter<AppExit>) {
-    use ratatui::crossterm::event::*;
-    for ev in events.read() {
-        if let KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } = **ev
-        {
-            exit.send_default();
-        }
+fn dampen(time: Res<Time>, mut query: Query<(&mut AngularVelocity, &mut Velocity), With<Player>>) {
+    let (mut w, mut v) = query.single_mut();
+    **w *= 1.0 - (ANGULAR_DAMPING * time.delta_secs()).min(1.0);
+    **v *= 1.0 - (LINEAR_DAMPING * time.delta_secs()).min(1.0);
+
+    let speed = Vec2::new(v.x, v.y).length();
+    if speed > MAX_VELOCITY {
+        **v *= MAX_VELOCITY / speed;
     }
+
+    **w = w.clamp(-MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY);
 }
 
 fn listen_movement(
     input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&mut AngularVelocity, &mut Velocity, &Isometry), With<Player>>,
+    mut query: Query<(&mut AngularVelocity, &mut Velocity, &Xf), With<Player>>,
 ) {
-    const THRUST_POWER: f32 = 0.4;
-    const ROTATION_POWER: f32 = 0.15;
-
     let (mut w, mut v, xf) = query.single_mut();
     let r = xf.rotation * Rot2::FRAC_PI_2;
 
@@ -286,6 +275,20 @@ fn listen_scroll(input: Res<ButtonInput<KeyCode>>, mut scroll: ResMut<LogScroll>
     }
 }
 
+fn listen_exit(mut events: EventReader<KeyEvent>, mut exit: EventWriter<AppExit>) {
+    use ratatui::crossterm::event::*;
+    for ev in events.read() {
+        if let KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } = **ev
+        {
+            exit.send_default();
+        }
+    }
+}
+
 #[derive(Resource, Deref, DerefMut, Default)]
 struct LogScroll(u16);
 
@@ -312,18 +315,28 @@ impl ViewState {
     }
 }
 
+macro_rules! bundle_ent {
+    ($($marker:ident),*) => {
+        $(
+            paste! {
+                #[derive(Bundle)]
+                struct [<$marker Bundle>] {
+                    marker: $marker,
+                    velocity: Velocity,
+                    angular_velocity: AngularVelocity,
+                    isometry: Xf,
+                    vertices: Vertices,
+                    xf_state: XfState,
+                }
+            }
+        )*
+    };
+}
+
+bundle_ent![Player, Asteroid];
+
 #[derive(Component, Default)]
 struct Player;
-
-#[derive(Bundle)]
-struct PlayerBundle {
-    marker: Player,
-    velocity: Velocity,
-    angular_velocity: AngularVelocity,
-    isometry: Isometry,
-    vertices: Vertices,
-    xf_state: XfState,
-}
 
 impl PlayerBundle {
     fn new(x: f32, y: f32) -> Self {
@@ -345,12 +358,6 @@ impl PlayerBundle {
 #[derive(Component)]
 struct Asteroid;
 
-#[derive(Bundle)]
-struct AsteroidBundle {
-    marker: Asteroid,
-    transform: Transform,
-}
-
 #[derive(Component, Deref, DerefMut)]
 struct Velocity(Vec2);
 
@@ -367,16 +374,16 @@ struct XfState {
 }
 
 #[derive(Component, Default, Debug, Deref, DerefMut)]
-struct Isometry(Isometry2d);
+struct Xf(Isometry2d);
 
-impl From<Isometry2d> for Isometry {
+impl From<Isometry2d> for Xf {
     fn from(value: Isometry2d) -> Self {
         Self(value)
     }
 }
 
-impl From<&Isometry> for Isometry2d {
-    fn from(value: &Isometry) -> Self {
+impl From<&Xf> for Isometry2d {
+    fn from(value: &Xf) -> Self {
         **value
     }
 }
