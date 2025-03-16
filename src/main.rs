@@ -110,6 +110,7 @@ fn draw_game(
     diag: Res<DiagnosticsStore>,
     shapes: Query<(&Isometry, &Vertices)>,
 ) {
+    let size = term.size().unwrap();
     let painter = |ctx: &mut Context| {
         for (
             Isometry2d {
@@ -125,10 +126,12 @@ fn draw_game(
             {
                 let [(x1, y1), (x2, y2)] = pair.map(|Vec2 { x, y }| {
                     (
-                        (px + (x * r.cos - y * r.sin)).into(),
-                        (py + (x * r.sin + y * r.cos)).into(),
+                        (px + (x * r.cos - y * r.sin)) as f64,
+                        (py + (x * r.sin + y * r.cos)) as f64,
                     )
                 });
+                let [x1, x2] = [x1, x2].map(|p| p.clamp(0., size.width as f64 - 2.));
+                let [y1, y2] = [y1, y2].map(|p| p.clamp(0., size.height as f64 - 2.));
                 ctx.draw(&canvas::Line {
                     x1,
                     y1,
