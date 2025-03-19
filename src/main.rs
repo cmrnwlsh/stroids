@@ -8,6 +8,7 @@ use bevy::{
     prelude::*,
     state::app::StatesPlugin,
 };
+use bevy_rand::{global::GlobalEntropy, plugin::EntropyPlugin, prelude::WyRand};
 use bevy_ratatui::{
     RatatuiPlugins,
     event::KeyEvent,
@@ -15,6 +16,7 @@ use bevy_ratatui::{
 };
 use log::{LogPlugin, LogStore};
 use paste::paste;
+use rand_core::RngCore;
 use ratatui::{
     layout::Size,
     style::Color,
@@ -24,7 +26,7 @@ use ratatui::{
         canvas::{self, Canvas, Context},
     },
 };
-use std::{iter, time::Duration};
+use std::{iter, ops::Neg, time::Duration};
 
 const MAX_VELOCITY: f32 = 20.0;
 const MAX_ANGULAR_VELOCITY: f32 = 4.0;
@@ -39,21 +41,22 @@ fn main() {
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
                 1. / 60.,
             ))),
+            EntropyPlugin::<WyRand>::default(),
+            StatesPlugin,
+            DiagnosticsPlugin,
+            FrameTimeDiagnosticsPlugin,
             RatatuiPlugins {
                 enable_mouse_capture: false,
                 enable_kitty_protocol: false,
                 enable_input_forwarding: true,
             },
-            StatesPlugin,
-            DiagnosticsPlugin,
-            FrameTimeDiagnosticsPlugin,
             LogPlugin,
         ))
         .init_state::<ViewState>()
         .init_state::<PauseState>()
         .insert_resource(Time::from_hz(60.))
         .init_resource::<LogScroll>()
-        .add_systems(Startup, init.after(terminal::setup))
+        .add_systems(Startup, (init.after(terminal::setup), print_random_values))
         .add_systems(
             Update,
             (
@@ -72,11 +75,20 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (apply_velocity, dampen, wrap_player)
+            (apply_velocity, dampen_player, wrap_player)
                 .chain()
                 .run_if(in_state(ViewState::Game)),
         )
         .run();
+}
+
+fn print_random_values(mut rng: GlobalEntropy<WyRand>) {
+    info!(
+        "Random values: {:#?}",
+        (0..10)
+            .map(|_| (rng.next_u64() % 20) as i32 - 10)
+            .collect::<Vec<_>>()
+    );
 }
 
 fn title_block(diag: Res<DiagnosticsStore>) -> Block {
@@ -211,7 +223,10 @@ fn apply_velocity(time: Res<Time>, mut query: Query<(&AngularVelocity, &Velocity
     }
 }
 
-fn dampen(time: Res<Time>, mut query: Query<(&mut AngularVelocity, &mut Velocity), With<Player>>) {
+fn dampen_player(
+    time: Res<Time>,
+    mut query: Query<(&mut AngularVelocity, &mut Velocity), With<Player>>,
+) {
     let (mut w, mut v) = query.single_mut();
     **w *= 1.0 - (ANGULAR_DAMPING * time.delta_secs()).min(1.0);
     **v *= 1.0 - (LINEAR_DAMPING * time.delta_secs()).min(1.0);
@@ -317,26 +332,27 @@ impl ViewState {
 
 macro_rules! bundle_ent {
     ($($marker:ident),*) => {
-        $(
-            paste! {
-                #[derive(Bundle)]
-                struct [<$marker Bundle>] {
-                    marker: $marker,
-                    velocity: Velocity,
-                    angular_velocity: AngularVelocity,
-                    isometry: Xf,
-                    vertices: Vertices,
-                    xf_state: XfState,
-                }
+        $(paste! {
+            #[derive(Bundle)]
+            struct [<$marker Bundle>] {
+                marker: $marker,
+                velocity: Velocity,
+                isometry: Xf,
+                angular_velocity: AngularVelocity,
+                vertices: Vertices,
+                xf_state: XfState,
             }
-        )*
+        })*
     };
 }
 
-bundle_ent![Player, Asteroid];
-
 #[derive(Component, Default)]
 struct Player;
+
+#[derive(Component, Default)]
+struct Asteroid;
+
+bundle_ent![Player, Asteroid];
 
 impl PlayerBundle {
     fn new(x: f32, y: f32) -> Self {
@@ -345,7 +361,7 @@ impl PlayerBundle {
             marker: Player,
             velocity: Velocity(Vec2::from((0., 0.))),
             angular_velocity: AngularVelocity(0.),
-            vertices: Vertices([(-1., -1.), (0., 1.5), (1., -1.)].map(Vec2::from).to_vec()),
+            vertices: vec![(-1., -1.), (0., 1.5), (1., -1.)].into(),
             isometry: isometry.into(),
             xf_state: XfState {
                 current: isometry,
@@ -355,17 +371,99 @@ impl PlayerBundle {
     }
 }
 
-#[derive(Component)]
-struct Asteroid;
+impl AsteroidBundle {
+    fn from_random(bounds: Size, mut rng: GlobalEntropy<WyRand>) -> Self {
+        enum Side {
+            Left,
+            Right,
+            Top,
+            Bottom,
+        }
+        let side = match rng.next_u64() % 4 {
+            0 => Side::Left,
+            1 => Side::Right,
+            2 => Side::Top,
+            3 => Side::Bottom,
+            _ => unreachable!(),
+        };
 
-#[derive(Component, Deref, DerefMut)]
+        let rx = (rng.next_u64() % bounds.width as u64) as f32;
+        let ry = (rng.next_u64() % bounds.height as u64) as f32;
+        let (px, py) = match side {
+            Side::Left => (0., ry),
+            Side::Right => (bounds.width as f32, ry),
+            Side::Top => (rx, bounds.height as f32),
+            Side::Bottom => (rx, 0.),
+        };
+
+        let z10 = (rng.next_u64() % 10) as f32;
+        let n10p10 = rng.next_u64() as f32 % 20. - 10.;
+        let (vx, vy) = match side {
+            Side::Left => (z10, n10p10),
+            Side::Right => (z10.neg(), n10p10),
+            Side::Top => (n10p10, z10.neg()),
+            Side::Bottom => (n10p10, z10),
+        };
+        let isometry = Isometry2d {
+            rotation: Rot2::degrees(rng.next_u64() as f32 % 360.),
+            translation: Vec2 { x: px, y: py },
+        };
+
+        Self {
+            marker: Asteroid,
+            velocity: Vec2 { x: vx, y: vy }.into(),
+            isometry: isometry.into(),
+            angular_velocity: (rng.next_u64() as f32 % 20.).into(),
+            vertices: vec![
+                (0., 5.),
+                (3., 4.),
+                (5., 2.),
+                (6., 0.),
+                (5., -2.),
+                (3., -4.),
+                (0., -5.),
+                (-3., -4.),
+                (-5., -2.),
+                (6., 0.),
+                (-5., 2.),
+                (-3., 4.),
+                (0., 5.),
+            ]
+            .into(),
+            xf_state: XfState {
+                current: isometry,
+                last: isometry,
+            },
+        }
+    }
+}
+
+#[derive(Component, Deref, DerefMut, Default)]
 struct Velocity(Vec2);
 
-#[derive(Component, Deref, DerefMut)]
+impl From<Vec2> for Velocity {
+    fn from(value: Vec2) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Component, Deref, DerefMut, Default)]
 struct AngularVelocity(f32);
+
+impl From<f32> for AngularVelocity {
+    fn from(value: f32) -> Self {
+        Self(value)
+    }
+}
 
 #[derive(Component, Default, Debug, Deref, DerefMut)]
 struct Vertices(Vec<Vec2>);
+
+impl From<Vec<(f32, f32)>> for Vertices {
+    fn from(value: Vec<(f32, f32)>) -> Self {
+        Self(value.into_iter().map(Vec2::from).collect())
+    }
+}
 
 #[derive(Component, Default, Debug)]
 struct XfState {
