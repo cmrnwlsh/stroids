@@ -5,6 +5,7 @@ mod log;
 use bevy::{
     app::ScheduleRunnerPlugin,
     diagnostic::{DiagnosticsPlugin, DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    math::ops::{cos, sin},
     prelude::*,
     state::app::StatesPlugin,
     time::common_conditions::on_timer,
@@ -27,7 +28,7 @@ use ratatui::{
         canvas::{self, Canvas, Context},
     },
 };
-use std::{iter, ops::Neg, time::Duration};
+use std::{f32::consts::PI, iter, ops::Neg, time::Duration};
 
 const MAX_VELOCITY: f32 = 20.0;
 const MAX_ANGULAR_VELOCITY: f32 = 4.0;
@@ -401,7 +402,6 @@ impl AsteroidBundle {
             3 => Side::Bottom,
             _ => unreachable!(),
         };
-
         let rx = (rng.next_u64() % bounds.width as u64) as f32;
         let ry = (rng.next_u64() % bounds.height as u64) as f32;
         let (px, py) = match side {
@@ -410,9 +410,8 @@ impl AsteroidBundle {
             Side::Top => (rx, bounds.height as f32),
             Side::Bottom => (rx, 0.),
         };
-
         let z10 = (rng.next_u64() % 10) as f32;
-        let n10p10 = rng.next_u64() as f32 % 20. - 10.;
+        let n10p10 = (rng.next_u64() % 20) as f32 - 10.;
         let (vx, vy) = match side {
             Side::Left => (z10, n10p10),
             Side::Right => (z10.neg(), n10p10),
@@ -420,36 +419,23 @@ impl AsteroidBundle {
             Side::Bottom => (n10p10, z10),
         };
         let isometry = Isometry2d {
-            rotation: Rot2::degrees(rng.next_u64() as f32 % 360.),
+            rotation: Rot2::degrees((rng.next_u64() % 360) as f32),
             translation: Vec2 { x: px, y: py },
         };
-
         Self {
             marker: Asteroid,
             velocity: Vec2 { x: vx, y: vy }.into(),
             isometry: isometry.into(),
-            angular_velocity: (rng.next_u64() as f32 % 5.).into(),
-            vertices: [
-                (4., 0.),
-                (3.46, 2.),
-                (2., 3.46),
-                (0., 4.),
-                (-2., 3.46),
-                (-3.46, 2.),
-                (-4., 0.),
-                (-3.46, -2.),
-                (-2., -3.46),
-                (0., -4.),
-                (2., -3.46),
-                (3.46, -2.),
-            ]
-            .map(|(x, y)| {
-                (
-                    (x + rng.next_u64() as f32 % 3.) - 1.,
-                    (y + rng.next_u64() as f32 % 3.) - 1.,
-                )
-            })
-            .into(),
+            angular_velocity: ((rng.next_u64() % 5) as f32).into(),
+            vertices: (0..11)
+                .map(|i| {
+                    (
+                        (4. * cos(2. * PI * i as f32 / 12.) + (rng.next_u64() % 3) as f32) - 1.,
+                        (4. * sin(2. * PI * i as f32 / 12.) + (rng.next_u64() % 3) as f32) - 1.,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
             xf_state: XfState {
                 current: isometry,
                 last: isometry,
