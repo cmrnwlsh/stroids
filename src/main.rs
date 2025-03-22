@@ -377,7 +377,7 @@ impl PlayerBundle {
             marker: Player,
             velocity: Velocity(Vec2::from((0., 0.))),
             angular_velocity: AngularVelocity(0.),
-            vertices: [(-1., -1.), (0., 1.5), (1., -1.)].into(),
+            vertices: vec![(-1., -1.), (0., 1.5), (1., -1.)].into(),
             isometry: isometry.into(),
             xf_state: XfState {
                 current: isometry,
@@ -465,12 +465,9 @@ impl From<f32> for AngularVelocity {
 #[derive(Component, Default, Debug, Deref, DerefMut)]
 struct Vertices(Vec<Vec2>);
 
-impl<T> From<T> for Vertices
-where
-    Vec<(f32, f32)>: From<T>,
-{
-    fn from(value: T) -> Self {
-        Self(Vec::from(value).into_iter().map(Vec2::from).collect())
+impl From<Vec<(f32, f32)>> for Vertices {
+    fn from(value: Vec<(f32, f32)>) -> Self {
+        Self(value.into_iter().map(Vec2::from).collect())
     }
 }
 
