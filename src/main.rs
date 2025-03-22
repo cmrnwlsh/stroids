@@ -7,6 +7,7 @@ use bevy::{
     diagnostic::{DiagnosticsPlugin, DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
     state::app::StatesPlugin,
+    time::common_conditions::on_timer,
 };
 use bevy_rand::{global::GlobalEntropy, plugin::EntropyPlugin, prelude::WyRand};
 use bevy_ratatui::{
@@ -63,14 +64,19 @@ fn main() {
                 listen_exit,
                 listen_log,
                 (listen_scroll, draw_logs).run_if(in_state(ViewState::Log)),
-                (listen_movement, (interpolate, draw_game).chain()).run_if(
-                    |view: Res<State<ViewState>>, pause: Res<State<PauseState>>| {
-                        matches!(
-                            (view.get(), pause.get()),
-                            (ViewState::Game, PauseState::Resume)
-                        )
-                    },
-                ),
+                (
+                    spawn_asteroid.run_if(on_timer(Duration::from_secs(2))),
+                    listen_movement,
+                    (interpolate, draw_game).chain(),
+                )
+                    .run_if(
+                        |view: Res<State<ViewState>>, pause: Res<State<PauseState>>| {
+                            matches!(
+                                (view.get(), pause.get()),
+                                (ViewState::Game, PauseState::Resume)
+                            )
+                        },
+                    ),
             ),
         )
         .add_systems(
@@ -239,6 +245,12 @@ fn dampen_player(
     **w = w.clamp(-MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY);
 }
 
+fn spawn_asteroid(term: Res<RatatuiContext>, rng: GlobalEntropy<WyRand>, mut commands: Commands) {
+    commands.spawn(AsteroidBundle::from_random(term.size().unwrap(), rng));
+}
+
+fn cleanup(term: Res<RatatuiContext>, query: Query<(Entity, &Xf), With<Asteroid>>) {}
+
 fn listen_movement(
     input: Res<ButtonInput<KeyCode>>,
     mut query: Query<(&mut AngularVelocity, &mut Velocity, &Xf), With<Player>>,
@@ -352,7 +364,10 @@ struct Player;
 #[derive(Component, Default)]
 struct Asteroid;
 
-bundle_ent![Player, Asteroid];
+#[derive(Component, Default)]
+struct Projectile;
+
+bundle_ent![Player, Asteroid, Projectile];
 
 impl PlayerBundle {
     fn new(x: f32, y: f32) -> Self {
@@ -361,7 +376,7 @@ impl PlayerBundle {
             marker: Player,
             velocity: Velocity(Vec2::from((0., 0.))),
             angular_velocity: AngularVelocity(0.),
-            vertices: vec![(-1., -1.), (0., 1.5), (1., -1.)].into(),
+            vertices: [(-1., -1.), (0., 1.5), (1., -1.)].into(),
             isometry: isometry.into(),
             xf_state: XfState {
                 current: isometry,
@@ -413,22 +428,27 @@ impl AsteroidBundle {
             marker: Asteroid,
             velocity: Vec2 { x: vx, y: vy }.into(),
             isometry: isometry.into(),
-            angular_velocity: (rng.next_u64() as f32 % 20.).into(),
-            vertices: vec![
-                (0., 5.),
-                (3., 4.),
-                (5., 2.),
-                (6., 0.),
-                (5., -2.),
-                (3., -4.),
-                (0., -5.),
-                (-3., -4.),
-                (-5., -2.),
-                (6., 0.),
-                (-5., 2.),
-                (-3., 4.),
-                (0., 5.),
+            angular_velocity: (rng.next_u64() as f32 % 5.).into(),
+            vertices: [
+                (4., 0.),
+                (3.46, 2.),
+                (2., 3.46),
+                (0., 4.),
+                (-2., 3.46),
+                (-3.46, 2.),
+                (-4., 0.),
+                (-3.46, -2.),
+                (-2., -3.46),
+                (0., -4.),
+                (2., -3.46),
+                (3.46, -2.),
             ]
+            .map(|(x, y)| {
+                (
+                    (x + rng.next_u64() as f32 % 3.) - 1.,
+                    (y + rng.next_u64() as f32 % 3.) - 1.,
+                )
+            })
             .into(),
             xf_state: XfState {
                 current: isometry,
@@ -459,9 +479,12 @@ impl From<f32> for AngularVelocity {
 #[derive(Component, Default, Debug, Deref, DerefMut)]
 struct Vertices(Vec<Vec2>);
 
-impl From<Vec<(f32, f32)>> for Vertices {
-    fn from(value: Vec<(f32, f32)>) -> Self {
-        Self(value.into_iter().map(Vec2::from).collect())
+impl<T> From<T> for Vertices
+where
+    Vec<(f32, f32)>: From<T>,
+{
+    fn from(value: T) -> Self {
+        Self(Vec::from(value).into_iter().map(Vec2::from).collect())
     }
 }
 
