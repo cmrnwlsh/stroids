@@ -8,7 +8,7 @@ use std::{
     panic::{set_hook, take_hook},
     sync::mpsc::{Receiver, channel},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::Result;
@@ -71,18 +71,20 @@ impl Game {
             }
 
             for Entity {
-                xf, xfs: (last, _), ..
+                xfs: (last, current),
+                ..
             } in g.ents.iter_mut()
             {
-                *last = xf.clone();
+                *last = current.clone();
             }
 
             accumulator += dt;
             while accumulator >= interval {
-                g.update(accumulator.as_secs_f64() / interval.as_secs_f64())?;
+                g.update()?;
                 accumulator -= interval;
             }
-            g.draw()?;
+
+            g.draw(accumulator.as_secs_f64() / UPDATE_INTERVAL)?;
 
             let frame_time = current_time.elapsed();
             if frame_time < target_frame_time {
@@ -93,37 +95,36 @@ impl Game {
 
     fn handle_input(&mut self) -> ControlFlow<()> {
         let player = &mut self.ents.player;
-        ControlFlow::Continue(for action in self.tui.input.try_iter() {
+        ControlFlow::Continue(if let Some(action) = self.tui.input.tick()? {
             match action {
                 Action::InputLeft => player.w -= TURN_POWER,
                 Action::InputRight => player.w += TURN_POWER,
-                Action::InputForward => player.v += Vec2::from(THRUST_POWER) * player.xf.rot,
-                Action::InputReverse => player.v -= Vec2::from(THRUST_POWER) * player.xf.rot,
+                Action::InputForward => player.v += Vec2::from(THRUST_POWER) * player.xfs.1.rot,
+                Action::InputReverse => player.v -= Vec2::from(THRUST_POWER) * player.xfs.1.rot,
                 Action::InputFire => todo!(),
-                Action::Exit => return ControlFlow::Break(()),
             }
         })
     }
 
-    fn update(&mut self, alpha: f64) -> Result<()> {
+    fn update(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn draw(&mut self) -> Result<()> {
+    fn draw(&mut self, alpha: f64) -> Result<()> {
         let block = Block::bordered()
             .title("STROIDS")
             .title(Line::from(" - WASD: Movement - Space: Fire - Ctrl+C: Exit - ").right_aligned());
         let painter = |ctx: &mut Context| {
             for shape in self.ents.iter().map(|ent| {
+                let (last, current) = &ent.xfs;
+                let xf = last.interpolate(current, alpha);
+                let (r, s, p) = (xf.rot, xf.scale, xf.pos);
                 ent.vertices
                     .iter()
                     .chain(iter::once(&ent.vertices[0]))
-                    .map(|v| {
-                        let (r, s, p) = (&ent.xf.rot, &ent.xf.scale, &ent.xf.pos);
-                        Vec2 {
-                            x: ((v.x * r.cos() - v.y * r.sin()) * s) + p.x,
-                            y: ((v.x * r.sin() + v.y * r.cos()) * s) + p.y,
-                        }
+                    .map(|v| Vec2 {
+                        x: ((v.x * r.cos() - v.y * r.sin()) * s) + p.x,
+                        y: ((v.x * r.sin() + v.y * r.cos()) * s) + p.y,
                     })
                     .collect::<Vec<_>>()
             }) {
@@ -148,27 +149,17 @@ impl Game {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Action {
     InputLeft,
     InputRight,
     InputForward,
     InputReverse,
     InputFire,
-    Exit,
-}
-
-#[derive(Clone, Copy, Default)]
-enum EntityKind {
-    #[default]
-    Player,
-    Asteroid,
-    Projectile,
 }
 
 #[derive(Default)]
 struct Entity {
-    kind: EntityKind,
-    xf: Transform,
     xfs: (Transform, Transform),
     v: Vec2,
     w: f64,
@@ -191,8 +182,6 @@ impl Ents {
         let xfs = (xf.clone(), xf.clone());
         Self {
             player: Entity {
-                kind: EntityKind::Player,
-                xf,
                 xfs,
                 v: Vec2::default(),
                 w: 0.,
@@ -223,6 +212,20 @@ struct Transform {
     pos: Vec2,
     rot: f64,
     scale: f64,
+}
+
+impl Transform {
+    fn interpolate(&self, other: &Transform, alpha: f64) -> Transform {
+        let t = self;
+        Transform {
+            pos: Vec2 {
+                x: t.pos.x + (other.pos.x - t.pos.x) * alpha,
+                y: t.pos.y + (other.pos.y - t.pos.y) * alpha,
+            },
+            rot: t.rot + (other.rot - t.rot) * alpha,
+            scale: t.scale + (other.scale - t.scale) * alpha,
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -298,9 +301,64 @@ where
     }
 }
 
+struct InputState {
+    last: Option<(Action, Instant)>,
+    input: Receiver<ControlFlow<(), (Action, Instant)>>,
+}
+
+impl InputState {
+    fn init() -> Self {
+        let (tx, rx) = channel();
+        thread::spawn(move || -> Result<()> {
+            Ok(loop {
+                let Event::Key(KeyEvent {
+                    code: KeyCode::Char(c),
+                    modifiers,
+                    ..
+                }) = event::read()?
+                else {
+                    continue;
+                };
+                if let (KeyModifiers::CONTROL, 'c') = (modifiers, c) {
+                    break tx.send(ControlFlow::Break(()))?;
+                }
+                tx.send(ControlFlow::Continue((
+                    match c {
+                        'w' => Action::InputForward,
+                        'a' => Action::InputLeft,
+                        's' => Action::InputReverse,
+                        'd' => Action::InputRight,
+                        ' ' => Action::InputFire,
+                        _ => continue,
+                    },
+                    Instant::now(),
+                )))?
+            })
+        });
+        Self {
+            last: None,
+            input: rx,
+        }
+    }
+
+    fn tick(&mut self) -> ControlFlow<(), Option<Action>> {
+        let last = self.input.try_iter().take_while(|e| e.is_continue()).last();
+        if let Some(msg) = last {
+            self.last = Some(msg?)
+        } else {
+            if let Some((_, instant)) = self.last {
+                if instant.elapsed().as_secs_f32() > 1. {
+                    self.last = None;
+                }
+            }
+        };
+        ControlFlow::Continue(self.last.map(|(action, _)| action))
+    }
+}
+
 struct Tui {
     term: Terminal<CrosstermBackend<Stdout>>,
-    input: Receiver<Action>,
+    input: InputState,
 }
 
 impl Tui {
@@ -312,37 +370,9 @@ impl Tui {
             let _ = Self::restore();
             hook(panic_info);
         }));
-        let (tx, rx) = channel();
-        thread::spawn(move || -> Result<()> {
-            Ok(loop {
-                let ev = event::read()?;
-                if let Event::Key(KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                }) = ev
-                {
-                    break tx.send(Action::Exit)?;
-                }
-                if let Event::Key(KeyEvent {
-                    code: KeyCode::Char(c),
-                    ..
-                }) = ev
-                {
-                    match c {
-                        'w' => tx.send(Action::InputForward)?,
-                        'a' => tx.send(Action::InputLeft)?,
-                        's' => tx.send(Action::InputReverse)?,
-                        'd' => tx.send(Action::InputRight)?,
-                        ' ' => tx.send(Action::InputFire)?,
-                        _ => (),
-                    }
-                }
-            })
-        });
         Ok(Self {
             term: Terminal::new(CrosstermBackend::new(stdout()))?,
-            input: rx,
+            input: InputState::init(),
         })
     }
 

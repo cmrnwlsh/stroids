@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 color-eyre = "0.6.3"
 ratatui = "0.29.0"
+wyrand = { version = "0.3.2", features = ["randomised_wyhash"] }
