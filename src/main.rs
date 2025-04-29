@@ -143,28 +143,28 @@ impl Game {
         let block = Block::bordered()
             .title("STROIDS")
             .title(Line::from(" - WASD: Movement - Space: Fire - Ctrl+C: Exit - ").right_aligned());
-        let painter = |ctx: &mut Context| {
-            for shape in self.ents.iter().map(|ent| {
-                let (last, current) = &ent.xfs;
-                let xf = last.interpolate(current, alpha);
-                let (r, s, p) = (xf.rot, xf.scale, xf.pos);
-                ent.vertices
-                    .iter()
-                    .chain(iter::once(&ent.vertices[0]))
-                    .map(|v| Vec2 {
-                        x: ((v.x * r.cos() - v.y * r.sin()) * s) + p.x,
-                        y: ((v.x * r.sin() + v.y * r.cos()) * s) + p.y,
-                    })
-                    .collect::<Vec<_>>()
-            }) {
-                for [v1, v2] in shape.array_windows() {
-                    ctx.draw(&canvas::Line::new(v1.x, v1.y, v2.x, v2.y, Color::White))
-                }
-            }
-        };
         let render_callback = |frame: &mut Frame| {
             let Rect { width, height, .. } = frame.area();
-            let (w, h) = (width as f64 / 2. + 4., height as f64 / 2. + 4.);
+            let (w, h) = (width as f64 / 2., height as f64 / 2.);
+            let painter = |ctx: &mut Context| {
+                for shape in self.ents.iter().map(|ent| {
+                    let (last, current) = &ent.xfs;
+                    let xf = last.interpolate(current, alpha);
+                    let (r, s, p) = (xf.rot, xf.scale, xf.pos);
+                    ent.vertices
+                        .iter()
+                        .chain(iter::once(&ent.vertices[0]))
+                        .map(|v| Vec2 {
+                            x: (((v.x * r.cos() - v.y * r.sin()) * s) + p.x).clamp(-w, w),
+                            y: (((v.x * r.sin() + v.y * r.cos()) * s) + p.y).clamp(-h, h),
+                        })
+                        .collect::<Vec<_>>()
+                }) {
+                    for [v1, v2] in shape.array_windows() {
+                        ctx.draw(&canvas::Line::new(v1.x, v1.y, v2.x, v2.y, Color::White))
+                    }
+                }
+            };
             frame.render_widget(
                 Canvas::default()
                     .block(block)
