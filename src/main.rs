@@ -1,12 +1,12 @@
 #![feature(array_windows)]
 
 use std::{
+    collections::HashSet,
     f64::consts::FRAC_PI_2,
     io::{Stdout, stdout},
     iter,
     ops::{AddAssign, ControlFlow, Mul, SubAssign},
     panic::{set_hook, take_hook},
-    sync::mpsc::{Receiver, channel},
     thread,
     time::{Duration, Instant},
 };
@@ -15,7 +15,7 @@ use color_eyre::eyre::Result;
 use ratatui::{
     Frame, Terminal,
     crossterm::{
-        event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
@@ -29,10 +29,12 @@ use ratatui::{
     },
 };
 
-const THRUST_POWER: f64 = 2.;
-const TURN_POWER: f64 = 2.;
+const THRUST_POWER: f64 = 0.005;
+const TURN_POWER: f64 = 0.005;
 const FRAME_TIME: f64 = 1. / 60.;
 const UPDATE_INTERVAL: f64 = 1. / 120.;
+const LINEAR_DAMPING: f64 = 0.99;
+const ANGULAR_DAMPING: f64 = 0.95;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -57,16 +59,16 @@ impl Game {
         let target_frame_time = Duration::from_secs_f64(FRAME_TIME);
         let interval = Duration::from_secs_f64(UPDATE_INTERVAL);
 
-        let mut last_time = std::time::Instant::now();
+        let mut last_time = Instant::now();
         let mut accumulator = Duration::default();
         let mut dt;
 
         Ok(loop {
-            let current_time = std::time::Instant::now();
+            let current_time = Instant::now();
             dt = current_time.duration_since(last_time);
             last_time = current_time;
 
-            if g.handle_input().is_break() {
+            if g.handle_input()?.is_break() {
                 break;
             }
 
@@ -93,20 +95,45 @@ impl Game {
         })
     }
 
-    fn handle_input(&mut self) -> ControlFlow<()> {
+    fn handle_input(&mut self) -> Result<ControlFlow<()>> {
+        let input = &mut self.tui.input;
         let player = &mut self.ents.player;
-        ControlFlow::Continue(if let Some(action) = self.tui.input.tick()? {
-            match action {
-                Action::InputLeft => player.w -= TURN_POWER,
-                Action::InputRight => player.w += TURN_POWER,
-                Action::InputForward => player.v += Vec2::from(THRUST_POWER) * player.xfs.1.rot,
-                Action::InputReverse => player.v -= Vec2::from(THRUST_POWER) * player.xfs.1.rot,
-                Action::InputFire => todo!(),
+
+        input.update();
+
+        while event::poll(Duration::from_millis(0))? {
+            if let Event::Key(ev) = event::read()? {
+                input.process(ev);
+                if ev.modifiers.contains(KeyModifiers::CONTROL) && ev.code == KeyCode::Char('c') {
+                    return Ok(ControlFlow::Break(()));
+                }
             }
-        })
+        }
+
+        if input.active(Action::InputLeft) {
+            player.w += TURN_POWER;
+        } else if input.active(Action::InputRight) {
+            player.w -= TURN_POWER;
+        }
+        if input.active(Action::InputForward) {
+            player.v += Vec2::from(player.xfs.1.rot) * THRUST_POWER;
+        } else if input.active(Action::InputReverse) {
+            player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER;
+        }
+        if input.active(Action::InputFire) {
+            todo!()
+        }
+
+        Ok(ControlFlow::Continue(()))
     }
 
     fn update(&mut self) -> Result<()> {
+        self.ents.player.v.x *= LINEAR_DAMPING;
+        self.ents.player.v.y *= LINEAR_DAMPING;
+        self.ents.player.w *= ANGULAR_DAMPING;
+        let xf = &mut self.ents.player.xfs.1;
+        xf.pos += self.ents.player.v;
+        xf.rot += self.ents.player.w;
         Ok(())
     }
 
@@ -228,7 +255,7 @@ impl Transform {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 struct Vec2 {
     x: f64,
     y: f64,
@@ -302,57 +329,67 @@ where
 }
 
 struct InputState {
-    last: Option<(Action, Instant)>,
-    input: Receiver<ControlFlow<(), (Action, Instant)>>,
+    pressed_keys: HashSet<KeyCode>,
+    modifiers: KeyModifiers,
+    release_timer: Instant,
+    auto_release_duration: Duration,
+    release_enabled: bool,
 }
 
 impl InputState {
     fn init() -> Self {
-        let (tx, rx) = channel();
-        thread::spawn(move || -> Result<()> {
-            Ok(loop {
-                let Event::Key(KeyEvent {
-                    code: KeyCode::Char(c),
-                    modifiers,
-                    ..
-                }) = event::read()?
-                else {
-                    continue;
-                };
-                if let (KeyModifiers::CONTROL, 'c') = (modifiers, c) {
-                    break tx.send(ControlFlow::Break(()))?;
-                }
-                tx.send(ControlFlow::Continue((
-                    match c {
-                        'w' => Action::InputForward,
-                        'a' => Action::InputLeft,
-                        's' => Action::InputReverse,
-                        'd' => Action::InputRight,
-                        ' ' => Action::InputFire,
-                        _ => continue,
-                    },
-                    Instant::now(),
-                )))?
-            })
-        });
         Self {
-            last: None,
-            input: rx,
+            pressed_keys: HashSet::new(),
+            modifiers: KeyModifiers::empty(),
+            release_timer: Instant::now(),
+            auto_release_duration: Duration::from_millis(500),
+            release_enabled: false, // Initially assume terminal doesn't send releases
         }
     }
 
-    fn tick(&mut self) -> ControlFlow<(), Option<Action>> {
-        let last = self.input.try_iter().take_while(|e| e.is_continue()).last();
-        if let Some(msg) = last {
-            self.last = Some(msg?)
-        } else {
-            if let Some((_, instant)) = self.last {
-                if instant.elapsed().as_secs_f32() > 1. {
-                    self.last = None;
-                }
+    fn active(&self, action: Action) -> bool {
+        match action {
+            Action::InputLeft => {
+                self.pressed_keys.contains(&KeyCode::Char('a'))
+                    || self.pressed_keys.contains(&KeyCode::Left)
             }
-        };
-        ControlFlow::Continue(self.last.map(|(action, _)| action))
+            Action::InputRight => {
+                self.pressed_keys.contains(&KeyCode::Char('d'))
+                    || self.pressed_keys.contains(&KeyCode::Right)
+            }
+            Action::InputForward => {
+                self.pressed_keys.contains(&KeyCode::Char('w'))
+                    || self.pressed_keys.contains(&KeyCode::Up)
+            }
+            Action::InputReverse => {
+                self.pressed_keys.contains(&KeyCode::Char('s'))
+                    || self.pressed_keys.contains(&KeyCode::Down)
+            }
+            Action::InputFire => self.pressed_keys.contains(&KeyCode::Char(' ')),
+        }
+    }
+
+    fn process(&mut self, key_event: KeyEvent) {
+        match key_event.kind {
+            KeyEventKind::Press => {
+                self.pressed_keys.insert(key_event.code);
+                self.modifiers = key_event.modifiers;
+                self.release_timer = Instant::now();
+            }
+            KeyEventKind::Release => {
+                self.pressed_keys.remove(&key_event.code);
+                self.release_enabled = true; // This flags terminal support
+            }
+            KeyEventKind::Repeat => {
+                self.release_timer = Instant::now();
+            }
+        }
+    }
+
+    fn update(&mut self) {
+        if !self.release_enabled && self.release_timer.elapsed() > self.auto_release_duration {
+            self.pressed_keys.clear();
+        }
     }
 }
 
