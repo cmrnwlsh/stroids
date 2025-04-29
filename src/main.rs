@@ -1,7 +1,7 @@
 #![feature(array_windows)]
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     f64::consts::FRAC_PI_2,
     io::{Stdout, stdout},
     iter,
@@ -30,7 +30,7 @@ use ratatui::{
 };
 
 const THRUST_POWER: f64 = 0.005;
-const TURN_POWER: f64 = 0.005;
+const TURN_POWER: f64 = 0.015;
 const FRAME_TIME: f64 = 1. / 60.;
 const UPDATE_INTERVAL: f64 = 1. / 120.;
 const LINEAR_DAMPING: f64 = 0.99;
@@ -111,9 +111,11 @@ impl Game {
         }
 
         if input.active(Action::InputLeft) {
-            player.w += TURN_POWER;
+            player.w = TURN_POWER;
         } else if input.active(Action::InputRight) {
-            player.w -= TURN_POWER;
+            player.w = -TURN_POWER;
+        } else {
+            player.w = 0.0;
         }
         if input.active(Action::InputForward) {
             player.v += Vec2::from(player.xfs.1.rot) * THRUST_POWER;
@@ -162,7 +164,7 @@ impl Game {
         };
         let render_callback = |frame: &mut Frame| {
             let Rect { width, height, .. } = frame.area();
-            let (w, h) = (width as f64 / 2., height as f64 / 2.);
+            let (w, h) = (width as f64 / 2. + 4., height as f64 / 2. + 4.);
             frame.render_widget(
                 Canvas::default()
                     .block(block)
@@ -314,24 +316,20 @@ where
     }
 }
 
-impl<T> Mul<T> for Vec2
-where
-    T: Into<Vec2>,
-{
+impl Mul<f64> for Vec2 {
     type Output = Vec2;
-    fn mul(self, rhs: T) -> Self::Output {
-        let Vec2 { x: x_rhs, y: y_rhs } = rhs.into();
+    fn mul(self, rhs: f64) -> Self::Output {
         Self {
-            x: self.x * x_rhs,
-            y: self.y * y_rhs,
+            x: self.x * rhs,
+            y: self.y * rhs,
         }
     }
 }
 
 struct InputState {
     pressed_keys: HashSet<KeyCode>,
+    key_timers: HashMap<KeyCode, Instant>, // Track time for each key
     modifiers: KeyModifiers,
-    release_timer: Instant,
     auto_release_duration: Duration,
     release_enabled: bool,
 }
@@ -340,8 +338,8 @@ impl InputState {
     fn init() -> Self {
         Self {
             pressed_keys: HashSet::new(),
+            key_timers: HashMap::new(),
             modifiers: KeyModifiers::empty(),
-            release_timer: Instant::now(),
             auto_release_duration: Duration::from_millis(500),
             release_enabled: false, // Initially assume terminal doesn't send releases
         }
@@ -373,22 +371,36 @@ impl InputState {
         match key_event.kind {
             KeyEventKind::Press => {
                 self.pressed_keys.insert(key_event.code);
+                self.key_timers.insert(key_event.code, Instant::now());
                 self.modifiers = key_event.modifiers;
-                self.release_timer = Instant::now();
             }
             KeyEventKind::Release => {
                 self.pressed_keys.remove(&key_event.code);
-                self.release_enabled = true; // This flags terminal support
+                self.key_timers.remove(&key_event.code);
+                self.release_enabled = true;
             }
             KeyEventKind::Repeat => {
-                self.release_timer = Instant::now();
+                if let Some(timer) = self.key_timers.get_mut(&key_event.code) {
+                    *timer = Instant::now();
+                }
             }
         }
     }
 
     fn update(&mut self) {
-        if !self.release_enabled && self.release_timer.elapsed() > self.auto_release_duration {
-            self.pressed_keys.clear();
+        if !self.release_enabled {
+            let now = Instant::now();
+            let expired_keys: Vec<KeyCode> = self
+                .key_timers
+                .iter()
+                .filter(|&(_, time)| now.duration_since(*time) > self.auto_release_duration)
+                .map(|(key, _)| *key)
+                .collect();
+
+            for key in expired_keys {
+                self.pressed_keys.remove(&key);
+                self.key_timers.remove(&key);
+            }
         }
     }
 }
