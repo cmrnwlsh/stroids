@@ -29,10 +29,10 @@ use ratatui::{
     },
 };
 
-const THRUST_POWER: f64 = 0.005;
-const TURN_POWER: f64 = 0.015;
 const FRAME_TIME: f64 = 1. / 60.;
 const UPDATE_INTERVAL: f64 = 1. / 120.;
+const THRUST_POWER: f64 = 0.005;
+const TURN_POWER: f64 = 0.015;
 const LINEAR_DAMPING: f64 = 0.99;
 const ANGULAR_DAMPING: f64 = 0.95;
 
