@@ -13,13 +13,13 @@ use std::{
 
 use color_eyre::eyre::Result;
 use ratatui::{
-    Frame, Terminal,
+    Terminal,
     crossterm::{
         event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    layout::Rect,
+    layout::{Rect, Size},
     prelude::CrosstermBackend,
     style::Color,
     text::Line,
@@ -32,7 +32,7 @@ use ratatui::{
 const FRAME_TIME: f64 = 1. / 60.;
 const UPDATE_INTERVAL: f64 = 1. / 120.;
 const THRUST_POWER: f64 = 0.005;
-const TURN_POWER: f64 = 0.015;
+const TURN_POWER: f64 = 0.0155;
 const LINEAR_DAMPING: f64 = 0.99;
 const ANGULAR_DAMPING: f64 = 0.95;
 
@@ -77,7 +77,7 @@ impl Game {
                 ..
             } in g.ents.iter_mut()
             {
-                *last = current.clone();
+                *last = *current;
             }
 
             accumulator += dt;
@@ -130,20 +130,40 @@ impl Game {
     }
 
     fn update(&mut self) -> Result<()> {
-        self.ents.player.v.x *= LINEAR_DAMPING;
-        self.ents.player.v.y *= LINEAR_DAMPING;
-        self.ents.player.w *= ANGULAR_DAMPING;
-        let xf = &mut self.ents.player.xfs.1;
-        xf.pos += self.ents.player.v;
-        xf.rot += self.ents.player.w;
-        Ok(())
+        for ent in self.ents.iter_mut() {
+            ent.v.x *= LINEAR_DAMPING;
+            ent.v.y *= LINEAR_DAMPING;
+            ent.w *= ANGULAR_DAMPING;
+            let xf = &mut ent.xfs.1;
+            xf.pos += ent.v;
+            xf.rot += ent.w;
+        }
+        let (last, curr) = &mut self.ents.player.xfs;
+        let pos = &mut curr.pos;
+        let Size { width, height } = self.tui.term.size()?;
+        let (w, h) = (width as f64 / 2., height as f64 / 2.);
+        Ok(
+            for (i, e) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
+                .into_iter()
+                .enumerate()
+            {
+                match (i, e) {
+                    (0, true) => pos.x = w,
+                    (1, true) => pos.y = -h,
+                    (2, true) => pos.x = -w,
+                    (3, true) => pos.y = h,
+                    _ => (),
+                }
+                e.then(|| last.pos = *pos);
+            },
+        )
     }
 
     fn draw(&mut self, alpha: f64) -> Result<()> {
         let block = Block::bordered()
             .title("STROIDS")
             .title(Line::from(" - WASD: Movement - Space: Fire - Ctrl+C: Exit - ").right_aligned());
-        let render_callback = |frame: &mut Frame| {
+        Ok(self.tui.term.draw(|frame| {
             let Rect { width, height, .. } = frame.area();
             let (w, h) = (width as f64 / 2., height as f64 / 2.);
             let painter = |ctx: &mut Context| {
@@ -173,8 +193,8 @@ impl Game {
                     .paint(painter),
                 frame.area(),
             );
-        };
-        Ok(self.tui.term.draw(render_callback)?).map(|_| ())
+        })?)
+        .map(|_| ())
     }
 }
 
@@ -208,7 +228,7 @@ impl Ents {
             rot: FRAC_PI_2,
             scale: 1.,
         };
-        let xfs = (xf.clone(), xf.clone());
+        let xfs = (xf, xf);
         Self {
             player: Entity {
                 xfs,
@@ -236,7 +256,7 @@ impl Ents {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 struct Transform {
     pos: Vec2,
     rot: f64,
@@ -327,60 +347,45 @@ impl Mul<f64> for Vec2 {
 }
 
 struct InputState {
-    pressed_keys: HashSet<KeyCode>,
-    key_timers: HashMap<KeyCode, Instant>, // Track time for each key
+    pressed: HashSet<KeyCode>,
+    timers: HashMap<KeyCode, Instant>,
     modifiers: KeyModifiers,
-    auto_release_duration: Duration,
-    release_enabled: bool,
+    release: Duration,
 }
 
 impl InputState {
     fn init() -> Self {
         Self {
-            pressed_keys: HashSet::new(),
-            key_timers: HashMap::new(),
+            pressed: HashSet::new(),
+            timers: HashMap::new(),
             modifiers: KeyModifiers::empty(),
-            auto_release_duration: Duration::from_millis(500),
-            release_enabled: false, // Initially assume terminal doesn't send releases
+            release: Duration::from_millis(500),
         }
     }
 
     fn active(&self, action: Action) -> bool {
         match action {
-            Action::InputLeft => {
-                self.pressed_keys.contains(&KeyCode::Char('a'))
-                    || self.pressed_keys.contains(&KeyCode::Left)
-            }
-            Action::InputRight => {
-                self.pressed_keys.contains(&KeyCode::Char('d'))
-                    || self.pressed_keys.contains(&KeyCode::Right)
-            }
-            Action::InputForward => {
-                self.pressed_keys.contains(&KeyCode::Char('w'))
-                    || self.pressed_keys.contains(&KeyCode::Up)
-            }
-            Action::InputReverse => {
-                self.pressed_keys.contains(&KeyCode::Char('s'))
-                    || self.pressed_keys.contains(&KeyCode::Down)
-            }
-            Action::InputFire => self.pressed_keys.contains(&KeyCode::Char(' ')),
+            Action::InputLeft => self.pressed.contains(&KeyCode::Char('a')),
+            Action::InputRight => self.pressed.contains(&KeyCode::Char('d')),
+            Action::InputForward => self.pressed.contains(&KeyCode::Char('w')),
+            Action::InputReverse => self.pressed.contains(&KeyCode::Char('s')),
+            Action::InputFire => self.pressed.contains(&KeyCode::Char(' ')),
         }
     }
 
     fn process(&mut self, key_event: KeyEvent) {
         match key_event.kind {
             KeyEventKind::Press => {
-                self.pressed_keys.insert(key_event.code);
-                self.key_timers.insert(key_event.code, Instant::now());
+                self.pressed.insert(key_event.code);
+                self.timers.insert(key_event.code, Instant::now());
                 self.modifiers = key_event.modifiers;
             }
             KeyEventKind::Release => {
-                self.pressed_keys.remove(&key_event.code);
-                self.key_timers.remove(&key_event.code);
-                self.release_enabled = true;
+                self.pressed.remove(&key_event.code);
+                self.timers.remove(&key_event.code);
             }
             KeyEventKind::Repeat => {
-                if let Some(timer) = self.key_timers.get_mut(&key_event.code) {
+                if let Some(timer) = self.timers.get_mut(&key_event.code) {
                     *timer = Instant::now();
                 }
             }
@@ -388,19 +393,17 @@ impl InputState {
     }
 
     fn update(&mut self) {
-        if !self.release_enabled {
-            let now = Instant::now();
-            let expired_keys: Vec<KeyCode> = self
-                .key_timers
-                .iter()
-                .filter(|&(_, time)| now.duration_since(*time) > self.auto_release_duration)
-                .map(|(key, _)| *key)
-                .collect();
+        let now = Instant::now();
+        let expired_keys: Vec<KeyCode> = self
+            .timers
+            .iter()
+            .filter(|&(_, time)| now.duration_since(*time) > self.release)
+            .map(|(key, _)| *key)
+            .collect();
 
-            for key in expired_keys {
-                self.pressed_keys.remove(&key);
-                self.key_timers.remove(&key);
-            }
+        for key in expired_keys {
+            self.pressed.remove(&key);
+            self.timers.remove(&key);
         }
     }
 }
