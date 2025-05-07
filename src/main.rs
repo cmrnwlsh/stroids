@@ -1,17 +1,18 @@
-#![feature(array_windows)]
+#![feature(array_windows, random)]
 
 use std::{
     collections::{HashMap, HashSet},
-    f64::consts::FRAC_PI_2,
+    f64::consts::{FRAC_PI_2, PI},
     io::{Stdout, stdout},
     iter,
     ops::{AddAssign, ControlFlow, Mul, SubAssign},
     panic::{set_hook, take_hook},
+    random::random,
     thread,
     time::{Duration, Instant},
 };
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Report, Result, bail};
 use ratatui::{
     Terminal,
     crossterm::{
@@ -28,13 +29,15 @@ use ratatui::{
         canvas::{self, Canvas, Context},
     },
 };
+use wyrand::{RandomWyHashState, WyRand};
 
 const FRAME_TIME: f64 = 1. / 60.;
 const UPDATE_INTERVAL: f64 = 1. / 120.;
 const THRUST_POWER: f64 = 0.005;
 const TURN_POWER: f64 = 0.0155;
 const LINEAR_DAMPING: f64 = 0.99;
-const ANGULAR_DAMPING: f64 = 0.95;
+const ANGULAR_DAMPING: f64 = 0.93;
+const INPUT_MS: u64 = 500;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -114,8 +117,6 @@ impl Game {
             player.w = TURN_POWER;
         } else if input.active(Action::InputRight) {
             player.w = -TURN_POWER;
-        } else {
-            player.w = 0.0;
         }
         if input.active(Action::InputForward) {
             player.v += Vec2::from(player.xfs.1.rot) * THRUST_POWER;
@@ -143,18 +144,19 @@ impl Game {
         let Size { width, height } = self.tui.term.size()?;
         let (w, h) = (width as f64 / 2., height as f64 / 2.);
         Ok(
-            for (i, e) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
+            for (i, wrapped) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
                 .into_iter()
                 .enumerate()
             {
-                match (i, e) {
-                    (0, true) => pos.x = w,
-                    (1, true) => pos.y = -h,
-                    (2, true) => pos.x = -w,
-                    (3, true) => pos.y = h,
-                    _ => (),
+                if wrapped {
+                    match Side::try_from(i)? {
+                        Side::Left => pos.x = w,
+                        Side::Top => pos.y = -h,
+                        Side::Right => pos.x = -w,
+                        Side::Bottom => pos.y = h,
+                    }
+                    last.pos = *pos
                 }
-                e.then(|| last.pos = *pos);
             },
         )
     }
@@ -215,10 +217,41 @@ struct Entity {
     vertices: Vec<Vec2>,
 }
 
+enum EntityKind {
+    Asteroid(AsteroidSize),
+    Projectile,
+}
+
+enum AsteroidSize {
+    Large,
+    Small,
+}
+
+enum Side {
+    Left,
+    Top,
+    Right,
+    Bottom,
+}
+
+impl TryFrom<usize> for Side {
+    type Error = Report;
+    fn try_from(value: usize) -> Result<Self> {
+        Ok(match value {
+            0 => Self::Left,
+            1 => Self::Top,
+            2 => Self::Right,
+            3 => Self::Bottom,
+            _ => bail!("index larger than 3"),
+        })
+    }
+}
+
 struct Ents {
     player: Entity,
     asteroids: Vec<Entity>,
     projectiles: Vec<Entity>,
+    rng: WyRand,
 }
 
 impl Ents {
@@ -232,12 +265,12 @@ impl Ents {
         Self {
             player: Entity {
                 xfs,
-                v: Vec2::default(),
-                w: 0.,
                 vertices: [(-1., 1.), (1., 0.), (-1., -1.)].map(Vec2::from).to_vec(),
+                ..Default::default()
             },
             asteroids: vec![],
             projectiles: vec![],
+            rng: WyRand::new(random()),
         }
     }
 
@@ -253,6 +286,56 @@ impl Ents {
         iter::once(&mut g.player)
             .chain(&mut g.asteroids)
             .chain(&mut g.projectiles)
+    }
+
+    fn rand_normalized(&mut self) -> f64 {
+        self.rng.rand() as f64 / u64::MAX as f64
+    }
+
+    fn spawn(&mut self, kind: EntityKind, bounds: Size) -> Result<()> {
+        let e = self;
+        let (width, height) = (bounds.width as f64, bounds.height as f64);
+        Ok(match kind {
+            EntityKind::Asteroid(size) => {
+                let side = Side::try_from((e.rng.rand() % 4) as usize)?;
+                let xf = Transform {
+                    pos: Vec2 {
+                        x: if let Side::Left | Side::Right = side {
+                            0.
+                        } else {
+                            e.rand_normalized() * width - width / 2.
+                        },
+                        y: if let Side::Top | Side::Bottom = side {
+                            0.
+                        } else {
+                            e.rand_normalized() * height - height / 2.
+                        },
+                    },
+                    rot: e.rand_normalized() * 2. * PI,
+                    scale: if let AsteroidSize::Small = size {
+                        0.5
+                    } else {
+                        1.
+                    },
+                };
+                let stroid = Entity {
+                    xfs: (xf, xf),
+                    v: Vec2 {
+                        x: e.rand_normalized() * 10.,
+                        y: e.rand_normalized() * 10.,
+                    },
+                    w: e.rand_normalized() * 10. - 5.,
+                    vertices: (0..12)
+                        .map(|i| Vec2 {
+                            x: (2. * PI * i as f64).cos(),
+                            y: (2. * PI * i as f64).sin(),
+                        })
+                        .collect(),
+                };
+                e.asteroids.push(stroid)
+            }
+            EntityKind::Projectile => todo!(),
+        })
     }
 }
 
@@ -347,8 +430,8 @@ impl Mul<f64> for Vec2 {
 }
 
 struct InputState {
-    pressed: HashSet<KeyCode>,
-    timers: HashMap<KeyCode, Instant>,
+    pressed: HashSet<KeyCode, RandomWyHashState>,
+    timers: HashMap<KeyCode, Instant, RandomWyHashState>,
     modifiers: KeyModifiers,
     release: Duration,
 }
@@ -356,36 +439,38 @@ struct InputState {
 impl InputState {
     fn init() -> Self {
         Self {
-            pressed: HashSet::new(),
-            timers: HashMap::new(),
+            pressed: HashSet::with_capacity_and_hasher(5, RandomWyHashState::new()),
+            timers: HashMap::with_capacity_and_hasher(5, RandomWyHashState::new()),
             modifiers: KeyModifiers::empty(),
-            release: Duration::from_millis(500),
+            release: Duration::from_millis(INPUT_MS),
         }
     }
 
     fn active(&self, action: Action) -> bool {
+        let c = |key| self.pressed.contains(key);
         match action {
-            Action::InputLeft => self.pressed.contains(&KeyCode::Char('a')),
-            Action::InputRight => self.pressed.contains(&KeyCode::Char('d')),
-            Action::InputForward => self.pressed.contains(&KeyCode::Char('w')),
-            Action::InputReverse => self.pressed.contains(&KeyCode::Char('s')),
-            Action::InputFire => self.pressed.contains(&KeyCode::Char(' ')),
+            Action::InputLeft => c(&KeyCode::Char('a')),
+            Action::InputRight => c(&KeyCode::Char('d')),
+            Action::InputForward => c(&KeyCode::Char('w')),
+            Action::InputReverse => c(&KeyCode::Char('s')),
+            Action::InputFire => c(&KeyCode::Char(' ')),
         }
     }
 
-    fn process(&mut self, key_event: KeyEvent) {
-        match key_event.kind {
+    fn process(&mut self, ev: KeyEvent) {
+        let s = self;
+        match ev.kind {
             KeyEventKind::Press => {
-                self.pressed.insert(key_event.code);
-                self.timers.insert(key_event.code, Instant::now());
-                self.modifiers = key_event.modifiers;
+                s.pressed.insert(ev.code);
+                s.timers.insert(ev.code, Instant::now());
+                s.modifiers = ev.modifiers;
             }
             KeyEventKind::Release => {
-                self.pressed.remove(&key_event.code);
-                self.timers.remove(&key_event.code);
+                s.pressed.remove(&ev.code);
+                s.timers.remove(&ev.code);
             }
             KeyEventKind::Repeat => {
-                if let Some(timer) = self.timers.get_mut(&key_event.code) {
+                if let Some(timer) = s.timers.get_mut(&ev.code) {
                     *timer = Instant::now();
                 }
             }
@@ -394,12 +479,12 @@ impl InputState {
 
     fn update(&mut self) {
         let now = Instant::now();
-        let expired_keys: Vec<KeyCode> = self
+        let expired_keys = self
             .timers
             .iter()
             .filter(|&(_, time)| now.duration_since(*time) > self.release)
             .map(|(key, _)| *key)
-            .collect();
+            .collect::<Vec<KeyCode>>();
 
         for key in expired_keys {
             self.pressed.remove(&key);
