@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    convert::identity,
     f64::consts::{FRAC_PI_2, PI},
     io::{Stdout, stdout},
     iter,
@@ -58,7 +59,6 @@ impl Game {
     }
 
     fn run(&mut self) -> Result<()> {
-        let g = self;
         let target_frame_time = Duration::from_secs_f64(FRAME_TIME);
         let interval = Duration::from_secs_f64(UPDATE_INTERVAL);
 
@@ -71,25 +71,25 @@ impl Game {
             dt = current_time.duration_since(last_time);
             last_time = current_time;
 
-            if g.handle_input()?.is_break() {
+            if self.handle_input()?.is_break() {
                 break;
             }
 
             for Entity {
                 xfs: (last, current),
                 ..
-            } in g.ents.iter_mut()
+            } in self.ents.iter_mut()
             {
                 *last = *current;
             }
 
             accumulator += dt;
             while accumulator >= interval {
-                g.update()?;
+                self.update()?;
                 accumulator -= interval;
             }
 
-            g.draw(accumulator.as_secs_f64() / UPDATE_INTERVAL)?;
+            self.draw(accumulator.as_secs_f64() / UPDATE_INTERVAL)?;
 
             let frame_time = current_time.elapsed();
             if frame_time < target_frame_time {
@@ -124,7 +124,7 @@ impl Game {
             player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER;
         }
         if input.active(Action::InputFire) {
-            todo!()
+            self.ents.spawn_stroid(self.tui.term.size()?)?;
         }
 
         Ok(ControlFlow::Continue(()))
@@ -132,33 +132,41 @@ impl Game {
 
     fn update(&mut self) -> Result<()> {
         for ent in self.ents.iter_mut() {
-            ent.v.x *= LINEAR_DAMPING;
-            ent.v.y *= LINEAR_DAMPING;
-            ent.w *= ANGULAR_DAMPING;
             let xf = &mut ent.xfs.1;
             xf.pos += ent.v;
             xf.rot += ent.w;
         }
-        let (last, curr) = &mut self.ents.player.xfs;
-        let pos = &mut curr.pos;
         let Size { width, height } = self.tui.term.size()?;
         let (w, h) = (width as f64 / 2., height as f64 / 2.);
-        Ok(
-            for (i, wrapped) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
-                .into_iter()
-                .enumerate()
-            {
-                if wrapped {
-                    match Side::try_from(i)? {
-                        Side::Left => pos.x = w,
-                        Side::Top => pos.y = -h,
-                        Side::Right => pos.x = -w,
-                        Side::Bottom => pos.y = h,
-                    }
-                    last.pos = *pos
+        for ents in [&mut self.ents.stroids, &mut self.ents.projectiles] {
+            ents.retain(|ent| {
+                let pos = ent.xfs.1.pos;
+                ![pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
+                    .into_iter()
+                    .any(identity)
+            });
+        }
+        let player = &mut self.ents.player;
+        player.v.x *= LINEAR_DAMPING;
+        player.v.y *= LINEAR_DAMPING;
+        player.w *= ANGULAR_DAMPING;
+        let (last, curr) = &mut player.xfs;
+        let pos = &mut curr.pos;
+        for (i, wrapped) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
+            .into_iter()
+            .enumerate()
+        {
+            if wrapped {
+                match Side::try_from(i)? {
+                    Side::Left => pos.x = w,
+                    Side::Top => pos.y = -h,
+                    Side::Right => pos.x = -w,
+                    Side::Bottom => pos.y = h,
                 }
-            },
-        )
+                last.pos = *pos
+            }
+        }
+        Ok(())
     }
 
     fn draw(&mut self, alpha: f64) -> Result<()> {
@@ -217,16 +225,6 @@ struct Entity {
     vertices: Vec<Vec2>,
 }
 
-enum EntityKind {
-    Asteroid(AsteroidSize),
-    Projectile,
-}
-
-enum AsteroidSize {
-    Large,
-    Small,
-}
-
 enum Side {
     Left,
     Top,
@@ -249,7 +247,7 @@ impl TryFrom<usize> for Side {
 
 struct Ents {
     player: Entity,
-    asteroids: Vec<Entity>,
+    stroids: Vec<Entity>,
     projectiles: Vec<Entity>,
     rng: WyRand,
 }
@@ -268,74 +266,82 @@ impl Ents {
                 vertices: [(-1., 1.), (1., 0.), (-1., -1.)].map(Vec2::from).to_vec(),
                 ..Default::default()
             },
-            asteroids: vec![],
+            stroids: vec![],
             projectiles: vec![],
             rng: WyRand::new(random()),
         }
     }
 
     fn iter(&self) -> impl Iterator<Item = &Entity> {
-        let g = self;
-        iter::once(&g.player)
-            .chain(&g.asteroids)
-            .chain(&g.projectiles)
+        iter::once(&self.player)
+            .chain(&self.stroids)
+            .chain(&self.projectiles)
     }
 
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut Entity> {
-        let g = self;
-        iter::once(&mut g.player)
-            .chain(&mut g.asteroids)
-            .chain(&mut g.projectiles)
+        iter::once(&mut self.player)
+            .chain(&mut self.stroids)
+            .chain(&mut self.projectiles)
     }
 
     fn rand_normalized(&mut self) -> f64 {
         self.rng.rand() as f64 / u64::MAX as f64
     }
 
-    fn spawn(&mut self, kind: EntityKind, bounds: Size) -> Result<()> {
-        let e = self;
+    fn spawn_stroid(&mut self, bounds: Size) -> Result<()> {
         let (width, height) = (bounds.width as f64, bounds.height as f64);
-        Ok(match kind {
-            EntityKind::Asteroid(size) => {
-                let side = Side::try_from((e.rng.rand() % 4) as usize)?;
-                let xf = Transform {
-                    pos: Vec2 {
-                        x: if let Side::Left | Side::Right = side {
-                            0.
-                        } else {
-                            e.rand_normalized() * width - width / 2.
-                        },
-                        y: if let Side::Top | Side::Bottom = side {
-                            0.
-                        } else {
-                            e.rand_normalized() * height - height / 2.
-                        },
-                    },
-                    rot: e.rand_normalized() * 2. * PI,
-                    scale: if let AsteroidSize::Small = size {
-                        0.5
-                    } else {
-                        1.
-                    },
-                };
-                let stroid = Entity {
-                    xfs: (xf, xf),
-                    v: Vec2 {
-                        x: e.rand_normalized() * 10.,
-                        y: e.rand_normalized() * 10.,
-                    },
-                    w: e.rand_normalized() * 10. - 5.,
-                    vertices: (0..12)
-                        .map(|i| Vec2 {
-                            x: (2. * PI * i as f64).cos(),
-                            y: (2. * PI * i as f64).sin(),
-                        })
-                        .collect(),
-                };
-                e.asteroids.push(stroid)
-            }
-            EntityKind::Projectile => todo!(),
-        })
+        let side = Side::try_from((self.rng.rand() % 4) as usize)?;
+        let xf = Transform {
+            pos: match side {
+                Side::Left => Vec2 {
+                    x: -width / 2.,
+                    y: self.rand_normalized() * height - height / 2.,
+                },
+                Side::Top => Vec2 {
+                    x: self.rand_normalized() * width - width / 2.,
+                    y: height / 2.,
+                },
+                Side::Right => Vec2 {
+                    x: width / 2.,
+                    y: self.rand_normalized() * height - height / 2.,
+                },
+                Side::Bottom => Vec2 {
+                    x: self.rand_normalized() * width - width / 2.,
+                    y: -height / 2.,
+                },
+            },
+            rot: self.rand_normalized() * 2. * PI,
+            scale: 2.,
+        };
+        let stroid = Entity {
+            xfs: (xf, xf),
+            v: match side {
+                Side::Left => Vec2 {
+                    x: self.rand_normalized(),
+                    y: self.rand_normalized() * 2. - 1.,
+                },
+                Side::Top => Vec2 {
+                    x: self.rand_normalized() * 2. - 1.,
+                    y: -self.rand_normalized(),
+                },
+                Side::Right => Vec2 {
+                    x: -self.rand_normalized(),
+                    y: self.rand_normalized() * 2. - 1.,
+                },
+                Side::Bottom => Vec2 {
+                    x: self.rand_normalized() * 2. - 1.,
+                    y: self.rand_normalized(),
+                },
+            },
+            w: self.rand_normalized() * 10. - 5.,
+            vertices: (0..12)
+                .map(|i| Vec2 {
+                    x: (2. * PI * i as f64 / 12.).cos(),
+                    y: (2. * PI * i as f64 / 12.).sin(),
+                })
+                .collect(),
+        };
+        Ok(self.stroids.push(stroid))
     }
 }
 
@@ -447,30 +453,29 @@ impl InputState {
     }
 
     fn active(&self, action: Action) -> bool {
-        let c = |key| self.pressed.contains(key);
+        let pressed = |key| self.pressed.contains(key);
         match action {
-            Action::InputLeft => c(&KeyCode::Char('a')),
-            Action::InputRight => c(&KeyCode::Char('d')),
-            Action::InputForward => c(&KeyCode::Char('w')),
-            Action::InputReverse => c(&KeyCode::Char('s')),
-            Action::InputFire => c(&KeyCode::Char(' ')),
+            Action::InputLeft => pressed(&KeyCode::Char('a')),
+            Action::InputRight => pressed(&KeyCode::Char('d')),
+            Action::InputForward => pressed(&KeyCode::Char('w')),
+            Action::InputReverse => pressed(&KeyCode::Char('s')),
+            Action::InputFire => pressed(&KeyCode::Char(' ')),
         }
     }
 
     fn process(&mut self, ev: KeyEvent) {
-        let s = self;
         match ev.kind {
             KeyEventKind::Press => {
-                s.pressed.insert(ev.code);
-                s.timers.insert(ev.code, Instant::now());
-                s.modifiers = ev.modifiers;
+                self.pressed.insert(ev.code);
+                self.timers.insert(ev.code, Instant::now());
+                self.modifiers = ev.modifiers;
             }
             KeyEventKind::Release => {
-                s.pressed.remove(&ev.code);
-                s.timers.remove(&ev.code);
+                self.pressed.remove(&ev.code);
+                self.timers.remove(&ev.code);
             }
             KeyEventKind::Repeat => {
-                if let Some(timer) = s.timers.get_mut(&ev.code) {
+                if let Some(timer) = self.timers.get_mut(&ev.code) {
                     *timer = Instant::now();
                 }
             }
