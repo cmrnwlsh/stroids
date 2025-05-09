@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::identity,
-    f64::consts::{FRAC_PI_2, PI},
+    f64::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     io::{Stdout, stdout},
     iter,
     ops::{AddAssign, ControlFlow, Mul, SubAssign},
@@ -39,6 +39,7 @@ const TURN_POWER: f64 = 0.0155;
 const LINEAR_DAMPING: f64 = 0.99;
 const ANGULAR_DAMPING: f64 = 0.93;
 const INPUT_MS: u64 = 500;
+const STROID_V: f64 = 0.1;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -138,12 +139,18 @@ impl Game {
         }
         let Size { width, height } = self.tui.term.size()?;
         let (w, h) = (width as f64 / 2., height as f64 / 2.);
+        let bounds = |pos: &Vec2, offset: f64| {
+            [
+                pos.x < -w - offset,
+                pos.y > h + offset,
+                pos.x > w + offset,
+                pos.y < -h - offset,
+            ]
+        };
         for ents in [&mut self.ents.stroids, &mut self.ents.projectiles] {
             ents.retain(|ent| {
                 let pos = ent.xfs.1.pos;
-                ![pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
-                    .into_iter()
-                    .any(identity)
+                !bounds(&pos, 4.).into_iter().any(identity)
             });
         }
         let player = &mut self.ents.player;
@@ -152,10 +159,7 @@ impl Game {
         player.w *= ANGULAR_DAMPING;
         let (last, curr) = &mut player.xfs;
         let pos = &mut curr.pos;
-        for (i, wrapped) in [pos.x < -w, pos.y > h, pos.x > w, pos.y < -h]
-            .into_iter()
-            .enumerate()
-        {
+        for (i, wrapped) in bounds(pos, 1.).into_iter().enumerate() {
             if wrapped {
                 match Side::try_from(i)? {
                     Side::Left => pos.x = w,
@@ -288,56 +292,46 @@ impl Ents {
         self.rng.rand() as f64 / u64::MAX as f64
     }
 
+    fn rand_range(&mut self, min: f64, max: f64) -> f64 {
+        min + self.rand_normalized() * (max - min)
+    }
+
     fn spawn_stroid(&mut self, bounds: Size) -> Result<()> {
         let (width, height) = (bounds.width as f64, bounds.height as f64);
         let side = Side::try_from((self.rng.rand() % 4) as usize)?;
-        let xf = Transform {
-            pos: match side {
-                Side::Left => Vec2 {
-                    x: -width / 2.,
-                    y: self.rand_normalized() * height - height / 2.,
-                },
-                Side::Top => Vec2 {
-                    x: self.rand_normalized() * width - width / 2.,
-                    y: height / 2.,
-                },
-                Side::Right => Vec2 {
-                    x: width / 2.,
-                    y: self.rand_normalized() * height - height / 2.,
-                },
-                Side::Bottom => Vec2 {
-                    x: self.rand_normalized() * width - width / 2.,
-                    y: -height / 2.,
-                },
-            },
-            rot: self.rand_normalized() * 2. * PI,
-            scale: 2.,
+        let xf = {
+            let r = self.rand_normalized();
+            let (x, y) = match side {
+                Side::Left => (-width / 2., r * height - height / 2.),
+                Side::Top => (r * width - width / 2., height / 2.),
+                Side::Right => (width / 2., r * height - height / 2.),
+                Side::Bottom => (r * width - width / 2., -height / 2.),
+            };
+            Transform {
+                pos: Vec2 { x, y },
+                rot: self.rand_normalized() * 2. * PI,
+                scale: 4.,
+            }
+        };
+        let angle = match side {
+            Side::Left => self.rand_range(-FRAC_PI_4, FRAC_PI_4),
+            Side::Top => self.rand_range(5. * FRAC_PI_4, 7. * FRAC_PI_4),
+            Side::Right => self.rand_range(3. * FRAC_PI_4, 5. * FRAC_PI_4),
+            Side::Bottom => self.rand_range(FRAC_PI_4, 3. * FRAC_PI_4),
         };
         let stroid = Entity {
             xfs: (xf, xf),
-            v: match side {
-                Side::Left => Vec2 {
-                    x: self.rand_normalized(),
-                    y: self.rand_normalized() * 2. - 1.,
-                },
-                Side::Top => Vec2 {
-                    x: self.rand_normalized() * 2. - 1.,
-                    y: -self.rand_normalized(),
-                },
-                Side::Right => Vec2 {
-                    x: -self.rand_normalized(),
-                    y: self.rand_normalized() * 2. - 1.,
-                },
-                Side::Bottom => Vec2 {
-                    x: self.rand_normalized() * 2. - 1.,
-                    y: self.rand_normalized(),
-                },
-            },
-            w: self.rand_normalized() * 10. - 5.,
+            v: Vec2 {
+                x: angle.cos(),
+                y: angle.sin(),
+            }
+            .normalized()
+                * self.rand_range(STROID_V * 0.7, STROID_V * 1.3),
+            w: self.rand_range(-0.01, 0.01),
             vertices: (0..12)
                 .map(|i| Vec2 {
-                    x: (2. * PI * i as f64 / 12.).cos(),
-                    y: (2. * PI * i as f64 / 12.).sin(),
+                    x: (2. * PI * i as f64 / 12.).cos() + self.rand_range(-0.25, 0.25),
+                    y: (2. * PI * i as f64 / 12.).sin() + self.rand_range(-0.25, 0.25),
                 })
                 .collect(),
         };
@@ -354,14 +348,13 @@ struct Transform {
 
 impl Transform {
     fn interpolate(&self, other: &Transform, alpha: f64) -> Transform {
-        let t = self;
         Transform {
             pos: Vec2 {
-                x: t.pos.x + (other.pos.x - t.pos.x) * alpha,
-                y: t.pos.y + (other.pos.y - t.pos.y) * alpha,
+                x: self.pos.x + (other.pos.x - self.pos.x) * alpha,
+                y: self.pos.y + (other.pos.y - self.pos.y) * alpha,
             },
-            rot: t.rot + (other.rot - t.rot) * alpha,
-            scale: t.scale + (other.scale - t.scale) * alpha,
+            rot: self.rot + (other.rot - self.rot) * alpha,
+            scale: self.scale + (other.scale - self.scale) * alpha,
         }
     }
 }
@@ -370,6 +363,27 @@ impl Transform {
 struct Vec2 {
     x: f64,
     y: f64,
+}
+
+impl Vec2 {
+    fn length(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    fn normalized(&mut self) -> Vec2 {
+        let len = self.length();
+        if len > 0.0 {
+            Vec2 {
+                x: self.x / len,
+                y: self.y / len,
+            }
+        } else {
+            Vec2 {
+                x: self.x,
+                y: self.y,
+            }
+        }
+    }
 }
 
 impl From<[f64; 2]> for Vec2 {
