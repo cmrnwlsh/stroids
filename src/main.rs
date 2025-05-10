@@ -134,7 +134,7 @@ impl Game {
         if input.active(Action::InputForward) {
             player.v += Vec2::from(player.xfs.1.rot) * THRUST_POWER;
         } else if input.active(Action::InputReverse) {
-            player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER;
+            player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER * 0.25;
         }
         if input.active(Action::InputFire) && Instant::now() - self.last_projectile > FIRE_DELAY {
             self.ents.spawn_projectile();
@@ -349,7 +349,7 @@ impl Ents {
 
     fn spawn_projectile(&mut self) {
         let mut xf = self.player.xfs.1;
-        xf.pos = xf.pos + Vec2::from(xf.rot) * 2.;
+        xf.pos += Vec2::from(xf.rot) * 2.;
         self.projectiles.push(Entity {
             xfs: (xf, xf),
             v: Vec2::from(self.player.xfs.1.rot) * PROJECTILE_V,
