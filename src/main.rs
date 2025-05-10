@@ -40,6 +40,7 @@ const LINEAR_DAMPING: f64 = 0.99;
 const ANGULAR_DAMPING: f64 = 0.93;
 const INPUT_MS: u64 = 500;
 const STROID_V: f64 = 0.1;
+const STROID_TIME: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -49,6 +50,7 @@ fn main() -> Result<()> {
 struct Game {
     tui: Tui,
     ents: Ents,
+    last_stroid: Instant,
 }
 
 impl Game {
@@ -56,6 +58,7 @@ impl Game {
         Ok(Self {
             tui: Tui::init()?,
             ents: Ents::init(),
+            last_stroid: Instant::now(),
         })
     }
 
@@ -68,12 +71,17 @@ impl Game {
         let mut dt;
 
         Ok(loop {
-            let current_time = Instant::now();
-            dt = current_time.duration_since(last_time);
-            last_time = current_time;
+            let now = Instant::now();
+            dt = now.duration_since(last_time);
+            last_time = now;
 
             if self.handle_input()?.is_break() {
                 break;
+            }
+
+            if now.duration_since(self.last_stroid) > STROID_TIME {
+                self.ents.spawn_stroid(self.tui.term.size()?)?;
+                self.last_stroid = now;
             }
 
             for Entity {
@@ -92,7 +100,7 @@ impl Game {
 
             self.draw(accumulator.as_secs_f64() / UPDATE_INTERVAL)?;
 
-            let frame_time = current_time.elapsed();
+            let frame_time = now.elapsed();
             if frame_time < target_frame_time {
                 thread::sleep(target_frame_time - frame_time);
             }
@@ -124,9 +132,7 @@ impl Game {
         } else if input.active(Action::InputReverse) {
             player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER;
         }
-        if input.active(Action::InputFire) {
-            self.ents.spawn_stroid(self.tui.term.size()?)?;
-        }
+        if input.active(Action::InputFire) {}
 
         Ok(ControlFlow::Continue(()))
     }
