@@ -6,7 +6,7 @@ use std::{
     f64::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     io::{Stdout, stdout},
     iter,
-    ops::{AddAssign, ControlFlow, Mul, SubAssign},
+    ops::{Add, AddAssign, ControlFlow, Mul, SubAssign},
     panic::{set_hook, take_hook},
     random::random,
     thread,
@@ -41,6 +41,8 @@ const ANGULAR_DAMPING: f64 = 0.93;
 const INPUT_MS: u64 = 500;
 const STROID_V: f64 = 0.1;
 const STROID_TIME: Duration = Duration::from_secs(1);
+const FIRE_DELAY: Duration = Duration::from_millis(500);
+const PROJECTILE_V: f64 = 0.25;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -51,6 +53,7 @@ struct Game {
     tui: Tui,
     ents: Ents,
     last_stroid: Instant,
+    last_projectile: Instant,
 }
 
 impl Game {
@@ -59,6 +62,7 @@ impl Game {
             tui: Tui::init()?,
             ents: Ents::init(),
             last_stroid: Instant::now(),
+            last_projectile: Instant::now() - FIRE_DELAY,
         })
     }
 
@@ -72,14 +76,14 @@ impl Game {
 
         Ok(loop {
             let now = Instant::now();
-            dt = now.duration_since(last_time);
+            dt = now - last_time;
             last_time = now;
 
             if self.handle_input()?.is_break() {
                 break;
             }
 
-            if now.duration_since(self.last_stroid) > STROID_TIME {
+            if now - self.last_stroid > STROID_TIME {
                 self.ents.spawn_stroid(self.tui.term.size()?)?;
                 self.last_stroid = now;
             }
@@ -132,7 +136,10 @@ impl Game {
         } else if input.active(Action::InputReverse) {
             player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER;
         }
-        if input.active(Action::InputFire) {}
+        if input.active(Action::InputFire) && Instant::now() - self.last_projectile > FIRE_DELAY {
+            self.ents.spawn_projectile();
+            self.last_projectile = Instant::now()
+        }
 
         Ok(ControlFlow::Continue(()))
     }
@@ -165,18 +172,19 @@ impl Game {
         player.w *= ANGULAR_DAMPING;
         let (last, curr) = &mut player.xfs;
         let pos = &mut curr.pos;
-        for (i, wrapped) in bounds(pos, 1.).into_iter().enumerate() {
-            if wrapped {
-                match Side::try_from(i)? {
-                    Side::Left => pos.x = w,
-                    Side::Top => pos.y = -h,
-                    Side::Right => pos.x = -w,
-                    Side::Bottom => pos.y = h,
+        Ok(
+            for (i, wrapped) in bounds(pos, 1.).into_iter().enumerate() {
+                if wrapped {
+                    match Side::try_from(i)? {
+                        Side::Left => pos.x = w,
+                        Side::Top => pos.y = -h,
+                        Side::Right => pos.x = -w,
+                        Side::Bottom => pos.y = h,
+                    }
+                    last.pos = *pos
                 }
-                last.pos = *pos
-            }
-        }
-        Ok(())
+            },
+        )
     }
 
     fn draw(&mut self, alpha: f64) -> Result<()> {
@@ -250,7 +258,7 @@ impl TryFrom<usize> for Side {
             1 => Self::Top,
             2 => Self::Right,
             3 => Self::Bottom,
-            _ => bail!("index larger than 3"),
+            _ => bail!("invalid side"),
         })
     }
 }
@@ -273,7 +281,7 @@ impl Ents {
         Self {
             player: Entity {
                 xfs,
-                vertices: [(-1., 1.), (1., 0.), (-1., -1.)].map(Vec2::from).to_vec(),
+                vertices: [(-1., 1.), (1., 0.), (-1., -1.)].map(Vec2::from).into(),
                 ..Default::default()
             },
             stroids: vec![],
@@ -308,10 +316,10 @@ impl Ents {
         let xf = {
             let r = self.rand_normalized();
             let (x, y) = match side {
-                Side::Left => (-width / 2., r * height - height / 2.),
-                Side::Top => (r * width - width / 2., height / 2.),
-                Side::Right => (width / 2., r * height - height / 2.),
-                Side::Bottom => (r * width - width / 2., -height / 2.),
+                Side::Left => (-width / 2. - 3., r * height - height / 2.),
+                Side::Top => (r * width - width / 2., height / 2. + 3.),
+                Side::Right => (width / 2. + 3., r * height - height / 2.),
+                Side::Bottom => (r * width - width / 2., -height / 2. - 3.),
             };
             Transform {
                 pos: Vec2 { x, y },
@@ -327,12 +335,7 @@ impl Ents {
         };
         let stroid = Entity {
             xfs: (xf, xf),
-            v: Vec2 {
-                x: angle.cos(),
-                y: angle.sin(),
-            }
-            .normalized()
-                * self.rand_range(STROID_V * 0.7, STROID_V * 1.3),
+            v: Vec2::from(angle).normalized() * self.rand_range(STROID_V * 0.7, STROID_V * 1.3),
             w: self.rand_range(-0.01, 0.01),
             vertices: (0..12)
                 .map(|i| Vec2 {
@@ -342,6 +345,17 @@ impl Ents {
                 .collect(),
         };
         Ok(self.stroids.push(stroid))
+    }
+
+    fn spawn_projectile(&mut self) {
+        let mut xf = self.player.xfs.1;
+        xf.pos = xf.pos + Vec2::from(xf.rot) * 2.;
+        self.projectiles.push(Entity {
+            xfs: (xf, xf),
+            v: Vec2::from(self.player.xfs.1.rot) * PROJECTILE_V,
+            w: 0.,
+            vertices: [(-1., 0.), (1., 0.)].map(Vec2::from).into(),
+        })
     }
 }
 
@@ -445,6 +459,17 @@ where
     }
 }
 
+impl Add for Vec2 {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Vec2 {
+            x: self.x + other.x,
+            y: self.y + other.y,
+        }
+    }
+}
+
 impl Mul<f64> for Vec2 {
     type Output = Vec2;
     fn mul(self, rhs: f64) -> Self::Output {
@@ -507,7 +532,7 @@ impl InputState {
         let expired_keys = self
             .timers
             .iter()
-            .filter(|&(_, time)| now.duration_since(*time) > self.release)
+            .filter(|&(_, time)| now - *time > self.release)
             .map(|(key, _)| *key)
             .collect::<Vec<KeyCode>>();
 
