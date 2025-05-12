@@ -1,12 +1,12 @@
-#![feature(array_windows, random)]
+#![feature(array_windows, random, const_trait_impl)]
 
 use std::{
     collections::{HashMap, HashSet},
     convert::identity,
-    f64::consts::{FRAC_PI_2, FRAC_PI_4, PI},
+    f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI},
     io::{Stdout, stdout},
     iter,
-    ops::{Add, AddAssign, ControlFlow, Mul, SubAssign},
+    ops::{Add, AddAssign, ControlFlow, Mul, Sub, SubAssign},
     panic::{set_hook, take_hook},
     random::random,
     thread,
@@ -54,6 +54,8 @@ struct Game {
     ents: Ents,
     last_stroid: Instant,
     last_projectile: Instant,
+    score: usize,
+    lives: usize,
 }
 
 impl Game {
@@ -63,6 +65,8 @@ impl Game {
             ents: Ents::init(),
             last_stroid: Instant::now(),
             last_projectile: Instant::now() - FIRE_DELAY,
+            score: 0,
+            lives: 3,
         })
     }
 
@@ -84,7 +88,7 @@ impl Game {
             }
 
             if now - self.last_stroid > STROID_TIME {
-                self.ents.spawn_stroid(self.tui.term.size()?)?;
+                self.ents.random_stroid(self.tui.term.size()?)?;
                 self.last_stroid = now;
             }
 
@@ -144,12 +148,7 @@ impl Game {
         Ok(ControlFlow::Continue(()))
     }
 
-    fn update(&mut self) -> Result<()> {
-        for ent in self.ents.iter_mut() {
-            let xf = &mut ent.xfs.1;
-            xf.pos += ent.v;
-            xf.rot += ent.w;
-        }
+    fn check_bounds(&mut self) -> Result<()> {
         let Size { width, height } = self.tui.term.size()?;
         let (w, h) = (width as f64 / 2., height as f64 / 2.);
         let bounds = |pos: &Vec2, offset: f64| {
@@ -187,9 +186,63 @@ impl Game {
         )
     }
 
+    fn check_collisions(&mut self) {
+        for pos in self
+            .ents
+            .stroids
+            .iter_mut()
+            .map(|stroid| {
+                let (st, pt) = (stroid.xfs.1, self.ents.player.xfs.1);
+                if st.pos.distance(&pt.pos) < st.scale + pt.scale {
+                    stroid.should_remove = true;
+                }
+                self.ents
+                    .projectiles
+                    .iter_mut()
+                    .filter_map(|projectile| {
+                        let pt = projectile.xfs.1;
+                        if st.pos.distance(&pt.pos) < st.scale + pt.scale {
+                            stroid.should_remove = true;
+                            projectile.should_remove = true;
+                            self.score += 1;
+                            if st.scale > 2. { Some(st.pos) } else { None }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect::<Vec<Vec2>>()
+        {
+            self.ents.explode_stroid(&pos);
+        }
+        for ents in [&mut self.ents.stroids, &mut self.ents.projectiles] {
+            ents.retain(|e| !e.should_remove)
+        }
+    }
+
+    fn update(&mut self) -> Result<()> {
+        for ent in self.ents.iter_mut() {
+            let xf = &mut ent.xfs.1;
+            xf.pos += ent.v;
+            xf.rot += ent.w;
+        }
+        self.check_bounds()?;
+        Ok(self.check_collisions())
+    }
+
     fn draw(&mut self, alpha: f64) -> Result<()> {
         let block = Block::bordered()
             .title("STROIDS")
+            .title(
+                Line::from(format!(
+                    " - Lives: {} - Score: {} - ",
+                    (0..self.lives).map(|_| 'Δ').collect::<String>(),
+                    self.score,
+                ))
+                .centered(),
+            )
             .title(Line::from(" - WASD: Movement - Space: Fire - Ctrl+C: Exit - ").right_aligned());
         Ok(self.tui.term.draw(|frame| {
             let Rect { width, height, .. } = frame.area();
@@ -241,6 +294,7 @@ struct Entity {
     v: Vec2,
     w: f64,
     vertices: Vec<Vec2>,
+    should_remove: bool,
 }
 
 enum Side {
@@ -310,41 +364,55 @@ impl Ents {
         min + self.rand_normalized() * (max - min)
     }
 
-    fn spawn_stroid(&mut self, bounds: Size) -> Result<()> {
+    fn random_stroid(&mut self, bounds: Size) -> Result<()> {
         let (width, height) = (bounds.width as f64, bounds.height as f64);
         let side = Side::try_from((self.rng.rand() % 4) as usize)?;
-        let xf = {
-            let r = self.rand_normalized();
-            let (x, y) = match side {
-                Side::Left => (-width / 2. - 3., r * height - height / 2.),
-                Side::Top => (r * width - width / 2., height / 2. + 3.),
-                Side::Right => (width / 2. + 3., r * height - height / 2.),
-                Side::Bottom => (r * width - width / 2., -height / 2. - 3.),
-            };
-            Transform {
-                pos: Vec2 { x, y },
-                rot: self.rand_normalized() * 2. * PI,
-                scale: 4.,
-            }
-        };
-        let angle = match side {
+        let r = self.rand_normalized();
+        let pos = Vec2::from(match side {
+            Side::Left => (-width / 2. - 3., r * height - height / 2.),
+            Side::Top => (r * width - width / 2., height / 2. + 3.),
+            Side::Right => (width / 2. + 3., r * height - height / 2.),
+            Side::Bottom => (r * width - width / 2., -height / 2. - 3.),
+        });
+        let rot = match side {
             Side::Left => self.rand_range(-FRAC_PI_4, FRAC_PI_4),
             Side::Top => self.rand_range(5. * FRAC_PI_4, 7. * FRAC_PI_4),
             Side::Right => self.rand_range(3. * FRAC_PI_4, 5. * FRAC_PI_4),
             Side::Bottom => self.rand_range(FRAC_PI_4, 3. * FRAC_PI_4),
         };
+        Ok(self.spawn_stroid(Transform {
+            pos,
+            rot,
+            scale: 4.,
+        }))
+    }
+
+    fn explode_stroid(&mut self, pos: &Vec2) {
+        for i in 0..3 {
+            let rot = i as f64 * 2. * PI / 3. + self.rand_range(0., PI);
+            let xf = Transform {
+                pos: *pos,
+                rot,
+                scale: 2.,
+            };
+            self.spawn_stroid(xf);
+        }
+    }
+
+    fn spawn_stroid(&mut self, xf: Transform) {
         let stroid = Entity {
             xfs: (xf, xf),
-            v: Vec2::from(angle).normalized() * self.rand_range(STROID_V * 0.7, STROID_V * 1.3),
+            v: Vec2::from(xf.rot).normalized() * self.rand_range(STROID_V * 0.7, STROID_V * 1.3),
             w: self.rand_range(-0.01, 0.01),
             vertices: (0..12)
-                .map(|i| Vec2 {
-                    x: (2. * PI * i as f64 / 12.).cos() + self.rand_range(-0.25, 0.25),
-                    y: (2. * PI * i as f64 / 12.).sin() + self.rand_range(-0.25, 0.25),
+                .map(|i| {
+                    let p = Vec2::from(2. * PI * i as f64 / 12.);
+                    [p.x, p.y].map(|c| c + self.rand_range(-0.25, 0.25)).into()
                 })
                 .collect(),
+            should_remove: false,
         };
-        Ok(self.stroids.push(stroid))
+        self.stroids.push(stroid);
     }
 
     fn spawn_projectile(&mut self) {
@@ -355,6 +423,7 @@ impl Ents {
             v: Vec2::from(self.player.xfs.1.rot) * PROJECTILE_V,
             w: 0.,
             vertices: [(-1., 0.), (1., 0.)].map(Vec2::from).into(),
+            should_remove: false,
         })
     }
 }
@@ -369,10 +438,7 @@ struct Transform {
 impl Transform {
     fn interpolate(&self, other: &Transform, alpha: f64) -> Transform {
         Transform {
-            pos: Vec2 {
-                x: self.pos.x + (other.pos.x - self.pos.x) * alpha,
-                y: self.pos.y + (other.pos.y - self.pos.y) * alpha,
-            },
+            pos: self.pos + (other.pos - self.pos) * alpha,
             rot: self.rot + (other.rot - self.rot) * alpha,
             scale: self.scale + (other.scale - self.scale) * alpha,
         }
@@ -403,6 +469,10 @@ impl Vec2 {
                 y: self.y,
             }
         }
+    }
+
+    fn distance(&self, other: &Vec2) -> f64 {
+        ((other.x - self.x).powi(2) + (other.y - self.y).powi(2)).sqrt()
     }
 }
 
@@ -466,6 +536,17 @@ impl Add for Vec2 {
         Vec2 {
             x: self.x + other.x,
             y: self.y + other.y,
+        }
+    }
+}
+
+impl Sub for Vec2 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Vec2 {
+            x: self.x - other.x,
+            y: self.y - other.y,
         }
     }
 }
