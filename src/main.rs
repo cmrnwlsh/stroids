@@ -1,9 +1,9 @@
-#![feature(array_windows, random, const_trait_impl)]
+#![feature(array_windows, random)]
 
 use std::{
     collections::{HashMap, HashSet},
     convert::identity,
-    f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI},
+    f64::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     io::{Stdout, stdout},
     iter,
     ops::{Add, AddAssign, ControlFlow, Mul, Sub, SubAssign},
@@ -26,7 +26,7 @@ use ratatui::{
     style::Color,
     text::Line,
     widgets::{
-        Block,
+        Block, Padding, Paragraph,
         canvas::{self, Canvas, Context},
     },
 };
@@ -54,8 +54,8 @@ struct Game {
     ents: Ents,
     last_stroid: Instant,
     last_projectile: Instant,
-    score: usize,
-    lives: usize,
+    score: i32,
+    lives: i32,
 }
 
 impl Game {
@@ -68,6 +68,14 @@ impl Game {
             score: 0,
             lives: 3,
         })
+    }
+
+    fn restart(&mut self) {
+        self.ents = Ents::init();
+        self.last_stroid = Instant::now();
+        self.last_projectile = Instant::now();
+        self.score = 0;
+        self.lives = 3;
     }
 
     fn run(&mut self) -> Result<()> {
@@ -87,23 +95,25 @@ impl Game {
                 break;
             }
 
-            if now - self.last_stroid > STROID_TIME {
-                self.ents.random_stroid(self.tui.term.size()?)?;
-                self.last_stroid = now;
-            }
+            if self.lives > 0 {
+                if now - self.last_stroid > STROID_TIME {
+                    self.ents.random_stroid(self.tui.term.size()?)?;
+                    self.last_stroid = now;
+                }
 
-            for Entity {
-                xfs: (last, current),
-                ..
-            } in self.ents.iter_mut()
-            {
-                *last = *current;
-            }
+                for Entity {
+                    xfs: (last, current),
+                    ..
+                } in self.ents.iter_mut()
+                {
+                    *last = *current;
+                }
 
-            accumulator += dt;
-            while accumulator >= interval {
-                self.update()?;
-                accumulator -= interval;
+                accumulator += dt;
+                while accumulator >= interval {
+                    self.update()?;
+                    accumulator -= interval;
+                }
             }
 
             self.draw(accumulator.as_secs_f64() / UPDATE_INTERVAL)?;
@@ -140,12 +150,17 @@ impl Game {
         } else if input.active(Action::InputReverse) {
             player.v -= Vec2::from(player.xfs.1.rot) * THRUST_POWER * 0.25;
         }
-        if input.active(Action::InputFire) && Instant::now() - self.last_projectile > FIRE_DELAY {
-            self.ents.spawn_projectile();
-            self.last_projectile = Instant::now()
-        }
-
-        Ok(ControlFlow::Continue(()))
+        Ok(ControlFlow::Continue(
+            if input.active(Action::InputFire) && Instant::now() - self.last_projectile > FIRE_DELAY
+            {
+                if self.lives == 0 {
+                    self.restart();
+                } else {
+                    self.ents.spawn_projectile();
+                    self.last_projectile = Instant::now()
+                }
+            },
+        ))
     }
 
     fn check_bounds(&mut self) -> Result<()> {
@@ -195,6 +210,7 @@ impl Game {
                 let (st, pt) = (stroid.xfs.1, self.ents.player.xfs.1);
                 if st.pos.distance(&pt.pos) < st.scale + pt.scale {
                     stroid.should_remove = true;
+                    self.lives -= 1;
                 }
                 self.ents
                     .projectiles
@@ -233,6 +249,7 @@ impl Game {
     }
 
     fn draw(&mut self, alpha: f64) -> Result<()> {
+        let size = self.tui.term.size()?;
         let block = Block::bordered()
             .title("STROIDS")
             .title(
@@ -266,14 +283,29 @@ impl Game {
                     }
                 }
             };
-            frame.render_widget(
-                Canvas::default()
-                    .block(block)
-                    .x_bounds([-w, w])
-                    .y_bounds([-h, h])
-                    .paint(painter),
-                frame.area(),
-            );
+            if self.lives > 0 {
+                frame.render_widget(
+                    Canvas::default()
+                        .block(block)
+                        .x_bounds([-w, w])
+                        .y_bounds([-h, h])
+                        .paint(painter),
+                    frame.area(),
+                )
+            } else {
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "GAME OVER\n\nFinal Score: {}\n\nPress Space To Restart",
+                        self.score,
+                    ))
+                    .centered()
+                    .block(block.padding(Padding {
+                        top: size.height / 4,
+                        ..Default::default()
+                    })),
+                    frame.area(),
+                )
+            };
         })?)
         .map(|_| ())
     }
@@ -552,8 +584,8 @@ impl Sub for Vec2 {
 }
 
 impl Mul<f64> for Vec2 {
-    type Output = Vec2;
-    fn mul(self, rhs: f64) -> Self::Output {
+    type Output = Self;
+    fn mul(self, rhs: f64) -> Self {
         Self {
             x: self.x * rhs,
             y: self.y * rhs,
